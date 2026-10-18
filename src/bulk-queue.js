@@ -89,8 +89,7 @@ export class BulkQueueController {
     }
 
     async pause() {
-        if (!this.queue) return;
-        if (this.queue.state !== 'running' && this.queue.state !== 'pausing') return;
+        if (!this.queue || this.queue.state !== 'running') return;
 
         this.queue.state = 'pausing';
         this.persistState();
@@ -178,7 +177,7 @@ export class BulkQueueController {
     }
 
     async stop() {
-        if (!this.queue) return;
+        if (!this.queue || !['running', 'pausing', 'paused'].includes(this.queue.state)) return;
 
         this.queue.state = 'stopping';
         this.jobToken++; // invalidate in-flight callbacks
@@ -206,13 +205,21 @@ export class BulkQueueController {
         this.queue.items.forEach(item => {
             if (item.state !== 'completed' && item.state !== 'failed') {
                 item.state = 'cancelled';
+                updateHistoryRecord({
+                    fileId: item.fileId,
+                    name: item.name,
+                    status: 'cancelled',
+                    attempts: item.attempts,
+                    bytes: item.bytes,
+                    source: 'bulk'
+                });
             }
         });
 
         // Close ONLY extension-owned tabs
         await this.closeAllOwnedTabs();
 
-        this.queue.state = 'finished';
+        this.queue.state = 'stopped';
         this.persistState();
     }
 
@@ -304,7 +311,7 @@ export class BulkQueueController {
 
             if (this.queue.state === 'stopping') {
                 this.jobToken++;
-                this.queue.state = 'finished';
+                this.queue.state = 'stopped';
                 this.persistState();
                 return;
             }
@@ -508,7 +515,7 @@ export class BulkQueueController {
         }
 
         if (status === 'cancelled') {
-            if (this.queue.state === 'stopping' || this.queue.state === 'finished') {
+            if (this.queue.state === 'stopping' || this.queue.state === 'finished' || this.queue.state === 'stopped') {
                 return;
             }
             this.handleItemTerminal(activeItem, 'interrupted', 'DOWNLOAD_CANCELLED', error || 'Download cancelled', this.jobToken);
@@ -571,15 +578,6 @@ export class BulkQueueController {
             item.state = 'queued'; // retry with fresh owned tab
             item.percent = 0;
             item.error = rawErrorMessage || errorReason;
-            updateHistoryRecord({
-                fileId: item.fileId,
-                name: item.name,
-                status: 'queued',
-                error: rawErrorMessage || errorReason,
-                attempts: item.attempts,
-                bytes: item.bytes,
-                source: 'bulk'
-            });
             this.persistState();
             await this.advance();
         } else {

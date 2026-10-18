@@ -278,7 +278,7 @@ export class DownloadEventsManager {
                     key: (req && req.fileId) || requestId,
                     fileId: req && req.fileId,
                     name: (req && req.videoTitle) || info.filename,
-                    status: status,
+                    status: isCancelled ? 'cancelled' : 'failed',
                     error: error,
                     source: info.isBulk ? 'bulk' : 'single'
                 });

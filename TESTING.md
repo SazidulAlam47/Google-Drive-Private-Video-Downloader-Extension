@@ -211,3 +211,33 @@ This document contains the step-by-step verification checklist for manual testin
      - The completed video remains visible in the Side Panel history list.
      - It is NOT removed when `chrome.tabs.onRemoved` fires.
      - Click **Clear History**; verify completed historical items are cleared while any active downloading items remain preserved.
+
+---
+
+#### 18. Bulk History Clearing & Dismissal (Bug 1 Verification)
+* **Status**: `[NOT RUN - Manual Browser Test Required]`
+* **Procedure**:
+  1. Run a bulk download on a folder with multiple videos until completed or stopped.
+  2. Verify items appear in the history list and the bulk summary panel shows `N / N · x failed`.
+  3. Click **Clear History**; verify:
+     - All terminal history records (`completed`, `failed`, `cancelled`, `interrupted`) are cleared from the list.
+     - Transient `queued` entries are not left orphaned.
+     - The bulk summary panel is reset and hidden.
+  4. In a new bulk run that finishes, verify the Dismiss button (`×`) appears in the bulk header.
+  5. Click `×`; verify the bulk summary panel is dismissed without wiping non-bulk history records.
+
+---
+
+#### 19. Stop Button Lifecycle & Stopped State Distinction (Bug 2 Verification)
+* **Status**: `[NOT RUN - Manual Browser Test Required]`
+* **Procedure**:
+  1. Run a bulk folder download and let all items finish downloading.
+  2. Verify that when state reaches `finished`:
+     - The **Stop** and **Pause/Resume** buttons are hidden/disabled.
+     - The Dismiss button (`×`) is visible.
+     - No stray clicks can trigger the stop confirmation modal or `bulkStop` message.
+  3. In another run with multiple videos, click **⏹ Stop** and confirm:
+     - The queue transitions to `stopped` state (red badge) rather than `finished`.
+     - Pending and active videos are recorded as `cancelled` in queue and history.
+     - Owned background tabs are closed.
+     - Further stop calls are guarded and ignored.

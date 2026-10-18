@@ -9,6 +9,8 @@ const STORAGE_KEY_BULK_QUEUE = 'bulkQueue';
 const STORAGE_KEY_HISTORY = 'downloadHistory';
 const STORAGE_KEY_BLOB_HANDOFF = 'blobHandoffUnsupported';
 
+export const ACTIVE_STATUSES = ['opening', 'capturing', 'starting', 'downloading', 'saving', 'paused'];
+
 export const state = {
     capturedRequests: {},
     downloadProgress: {},
@@ -129,20 +131,60 @@ export function updateHistoryRecord(entry) {
 }
 
 export function clearHistoryRecords() {
-    if (Array.isArray(state.history)) {
-        state.history = state.history.filter(h => h.status !== 'completed' && h.status !== 'failed' && h.status !== 'cancelled');
-    }
-    const toDelete = [];
-    for (const rid in state.downloadProgress) {
-        const st = state.downloadProgress[rid] && state.downloadProgress[rid].status;
-        if (st === 'completed' || st === 'failed' || st === 'cancelled' || st === 'interrupted') {
-            toDelete.push(rid);
+    let activeBulkItem = null;
+    if (state.bulkQueue && Array.isArray(state.bulkQueue.items) && typeof state.bulkQueue.index === 'number') {
+        const qState = state.bulkQueue.state;
+        if (qState === 'running' || qState === 'pausing' || qState === 'paused') {
+            activeBulkItem = state.bulkQueue.items[state.bulkQueue.index] || null;
         }
     }
-    toDelete.forEach(rid => {
+
+    if (Array.isArray(state.history)) {
+        state.history = state.history.filter(h => {
+            if (!h) return false;
+            if (ACTIVE_STATUSES.includes(h.status)) return true;
+            if (activeBulkItem) {
+                if (activeBulkItem.fileId && h.fileId === activeBulkItem.fileId) return true;
+                if (activeBulkItem.requestId && h.key === activeBulkItem.requestId) return true;
+            }
+            return false;
+        });
+    }
+
+    const progressToDelete = [];
+    for (const rid in state.downloadProgress) {
+        const p = state.downloadProgress[rid];
+        const st = p && p.status;
+        if (!st || !ACTIVE_STATUSES.includes(st)) {
+            progressToDelete.push(rid);
+        }
+    }
+    progressToDelete.forEach(rid => {
         delete state.downloadProgress[rid];
+    });
+
+    const requestsToDelete = [];
+    for (const rid in state.capturedRequests) {
+        const req = state.capturedRequests[rid];
+        const prog = state.downloadProgress[rid];
+        const hasActiveProgress = prog && ACTIVE_STATUSES.includes(prog.status);
+        const isActiveBulk = activeBulkItem && (
+            rid === activeBulkItem.requestId ||
+            (req && req.fileId && req.fileId === activeBulkItem.fileId)
+        );
+
+        if (!hasActiveProgress && !isActiveBulk) {
+            requestsToDelete.push(rid);
+        }
+    }
+    requestsToDelete.forEach(rid => {
         delete state.capturedRequests[rid];
     });
+
+    if (state.bulkQueue && (state.bulkQueue.state === 'finished' || state.bulkQueue.state === 'stopped' || state.bulkQueue.state === 'idle')) {
+        state.bulkQueue = null;
+    }
+
     persistStateNow();
 }
 
@@ -270,7 +312,7 @@ export function countActiveDownloads() {
     let count = 0;
     for (const rid in state.downloadProgress) {
         const st = state.downloadProgress[rid] && state.downloadProgress[rid].status;
-        if (st === 'starting' || st === 'downloading' || st === 'saving' || st === 'paused') {
+        if (st && ACTIVE_STATUSES.includes(st)) {
             count++;
         }
     }

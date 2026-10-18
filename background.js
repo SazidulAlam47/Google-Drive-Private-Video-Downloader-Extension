@@ -1,7 +1,7 @@
 // Service worker entry point for Drive Private Video Downloader.
 // Manages capture, lifecycle listeners, tab state, and message dispatch.
 
-import { state, schedulePersist, persistStateNow, loadPersistedState, countActiveDownloads, clearHistoryRecords } from './src/state.js';
+import { state, schedulePersist, persistStateNow, loadPersistedState, countActiveDownloads, clearHistoryRecords, ACTIVE_STATUSES } from './src/state.js';
 import { attachCaptureForTab, detachCaptureForTab, detachAllPassiveCaptures, reconcileDebuggerTargets, handleDebuggerDetach, handleDebuggerEvent, extractDriveFileId } from './src/capture.js';
 import { chunkedDownloadFn } from './src/download-engine.js';
 import { ERROR_CODES, getErrorMessage } from './src/errors.js';
@@ -82,7 +82,7 @@ export const activeDownloads = downloadEventsManager.activeDownloads;
 
 // Register terminal listener for bulk queue
 registerDownloadTerminalListener((requestId, resultState, errorReason) => {
-    if (bulkController.queue && bulkController.queue.state !== 'finished') {
+    if (bulkController.queue && bulkController.queue.state !== 'finished' && bulkController.queue.state !== 'stopped') {
         const activeItem = bulkController.queue.items[bulkController.queue.index];
         if (activeItem && activeItem.requestId === requestId) {
             bulkController.handleItemTerminal(activeItem, resultState, errorReason, null, bulkController.jobToken);
@@ -497,6 +497,15 @@ if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage)
         return true;
     }
 
+    if (message.type === 'bulkDismiss') {
+        if (state.bulkQueue && (state.bulkQueue.state === 'finished' || state.bulkQueue.state === 'stopped' || state.bulkQueue.state === 'idle')) {
+            state.bulkQueue = null;
+            persistStateNow();
+        }
+        sendResponse({ success: true });
+        return;
+    }
+
     if (message.type === 'reloadTabAndCapture') {
         const targetTabId = message.tabId || (state.activeTabInfo && state.activeTabInfo.tabId);
         if (targetTabId) {
@@ -576,7 +585,7 @@ if (typeof chrome !== 'undefined' && chrome.tabs) {
                 if (!closedTabRequestIds.has(rid)) return;
                 const p = state.downloadProgress[rid];
                 const st = p && p.status;
-                if (st === 'starting' || st === 'downloading' || st === 'saving' || st === 'paused') {
+                if (st && ACTIVE_STATUSES.includes(st)) {
                     p.status = 'interrupted';
                     p.error = 'Tab was closed during download. Click Retry to restart.';
                     p.lastUpdated = Date.now();

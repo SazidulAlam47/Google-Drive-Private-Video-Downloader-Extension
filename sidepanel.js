@@ -1,5 +1,6 @@
 // Side Panel Controller
 import { ERROR_CODES, getErrorMessage } from './src/errors.js';
+import { getBulkControlsState } from './src/ui-logic.js';
 
 document.addEventListener("DOMContentLoaded", () => {
     const MAX_CONCURRENT = 3;
@@ -27,6 +28,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const bulkStatusBadge = document.getElementById('bulkStatusBadge');
     const bulkPauseResumeBtn = document.getElementById('bulkPauseResumeBtn');
     const bulkStopBtn = document.getElementById('bulkStopBtn');
+    const bulkDismissBtn = document.getElementById('bulkDismissBtn');
     const bulkProgressSummary = document.getElementById('bulkProgressSummary');
     const bulkCurrentProgressWrap = document.getElementById('bulkCurrentProgressWrap');
     const bulkCurrentProgressFill = document.getElementById('bulkCurrentProgressFill');
@@ -623,7 +625,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
     function updateBulkQueueUI(queue) {
         bulkQueueCache = queue;
-        if (!queue || queue.state === 'idle') {
+        const ctrl = getBulkControlsState(queue);
+
+        if (!ctrl.showPanel) {
             bulkPanel.classList.add('hidden');
             return;
         }
@@ -631,21 +635,31 @@ document.addEventListener("DOMContentLoaded", () => {
         bulkPanel.classList.remove('hidden');
 
         // Status badge
-        bulkStatusBadge.textContent = queue.state;
-        bulkStatusBadge.className = 'bulk-status-badge ' + (queue.state || 'running');
+        bulkStatusBadge.textContent = ctrl.badgeText;
+        bulkStatusBadge.className = ctrl.badgeClass;
 
         // Pause / Resume button
-        if (queue.state === 'paused') {
-            bulkPauseResumeBtn.textContent = '▶ Resume';
-            bulkPauseResumeBtn.disabled = false;
-        } else if (queue.state === 'running') {
-            bulkPauseResumeBtn.textContent = '⏸ Pause';
-            bulkPauseResumeBtn.disabled = false;
-        } else if (queue.state === 'pausing') {
-            bulkPauseResumeBtn.textContent = 'Pausing...';
-            bulkPauseResumeBtn.disabled = true;
+        bulkPauseResumeBtn.textContent = ctrl.pause.label;
+        bulkPauseResumeBtn.disabled = !ctrl.pause.enabled;
+        if (ctrl.pause.visible) {
+            bulkPauseResumeBtn.classList.remove('hidden');
         } else {
-            bulkPauseResumeBtn.disabled = true;
+            bulkPauseResumeBtn.classList.add('hidden');
+        }
+
+        // Stop button
+        bulkStopBtn.disabled = !ctrl.stop.enabled;
+        if (ctrl.stop.visible) {
+            bulkStopBtn.classList.remove('hidden');
+        } else {
+            bulkStopBtn.classList.add('hidden');
+        }
+
+        // Dismiss button
+        if (ctrl.dismissVisible) {
+            bulkDismissBtn.classList.remove('hidden');
+        } else {
+            bulkDismissBtn.classList.add('hidden');
         }
 
         // Restarted banner
@@ -657,14 +671,11 @@ document.addEventListener("DOMContentLoaded", () => {
         }
 
         // Summary: e.g. "7 / 37 · 1 failed"
-        const total = queue.items ? queue.items.length : 0;
-        const completed = queue.items ? queue.items.filter(i => i.state === 'completed').length : 0;
-        const failed = queue.items ? queue.items.filter(i => i.state === 'failed').length : 0;
-        bulkProgressSummary.textContent = `${completed} / ${total} · ${failed} failed`;
+        bulkProgressSummary.textContent = ctrl.summaryText;
 
         // Current item progress
         const activeItem = queue.items && typeof queue.index === 'number' ? queue.items[queue.index] : null;
-        if (activeItem && (queue.state === 'running' || queue.state === 'paused' || queue.state === 'pausing')) {
+        if (ctrl.showCurrentItem && activeItem) {
             bulkCurrentProgressWrap.classList.remove('hidden');
             bulkCurrentItemTitle.textContent = activeItem.name || 'Processing video...';
             const pct = activeItem.percent || 0;
@@ -701,9 +712,15 @@ document.addEventListener("DOMContentLoaded", () => {
     // Clear History
     clearHistoryBtn.addEventListener('click', () => {
         chrome.runtime.sendMessage({ type: 'clearHistory' }, () => {
-            historyCache = historyCache.filter(h => h.status !== 'completed' && h.status !== 'failed' && h.status !== 'cancelled');
-            syncList(capturedRequestsCache, downloadProgressCache, historyCache);
-            setStatus('History cleared.', false, 2000);
+            chrome.runtime.sendMessage({ type: 'getState' }, (resp) => {
+                if (chrome.runtime.lastError || !resp) return;
+                capturedRequestsCache = resp.requests || {};
+                downloadProgressCache = resp.progress || {};
+                historyCache = resp.history || [];
+                updateBulkQueueUI(resp.bulkQueue);
+                syncList(capturedRequestsCache, downloadProgressCache, historyCache);
+                setStatus('History cleared.', false, 2000);
+            });
         });
     });
 
@@ -826,6 +843,9 @@ document.addEventListener("DOMContentLoaded", () => {
     });
 
     bulkStopBtn.addEventListener('click', () => {
+        if (!bulkQueueCache || (bulkQueueCache.state !== 'running' && bulkQueueCache.state !== 'pausing' && bulkQueueCache.state !== 'paused')) {
+            return;
+        }
         stopConfirmModal.classList.remove('hidden');
     });
 
@@ -835,7 +855,18 @@ document.addEventListener("DOMContentLoaded", () => {
 
     stopConfirmBtn.addEventListener('click', () => {
         stopConfirmModal.classList.add('hidden');
+        if (!bulkQueueCache || (bulkQueueCache.state !== 'running' && bulkQueueCache.state !== 'pausing' && bulkQueueCache.state !== 'paused')) {
+            setStatus('Bulk queue is already finished or stopped.', false, 2000);
+            return;
+        }
         chrome.runtime.sendMessage({ type: 'bulkStop' });
+    });
+
+    bulkDismissBtn.addEventListener('click', () => {
+        chrome.runtime.sendMessage({ type: 'bulkDismiss' }, () => {
+            bulkPanel.classList.add('hidden');
+            bulkQueueCache = null;
+        });
     });
 
     // Initial State Fetch

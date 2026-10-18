@@ -283,10 +283,31 @@ body {
 .bulk-status-badge.paused { background: #854d0e; color: #fde047; }
 .bulk-status-badge.scanning { background: #1e40af; color: #93c5fd; }
 .bulk-status-badge.finished { background: #374151; color: #d1d5db; }
+.bulk-status-badge.stopped { background: #7f1d1d; color: #fca5a5; }
 
 .bulk-controls {
     display: flex;
+    align-items: center;
     gap: 6px;
+}
+
+.bulk-dismiss-btn {
+    background: transparent;
+    border: none;
+    color: #9ca3af;
+    cursor: pointer;
+    font-size: 16px;
+    line-height: 1;
+    padding: 2px 6px;
+    border-radius: 4px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.bulk-dismiss-btn:hover {
+    color: #fff;
+    background: #374151;
 }
 
 .bulk-ctrl-btn {
