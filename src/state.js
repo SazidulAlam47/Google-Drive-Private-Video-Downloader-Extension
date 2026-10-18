@@ -6,6 +6,8 @@ const STORAGE_KEY_ENABLED = 'extensionEnabled';
 const STORAGE_KEY_DESTINATION = 'destination';
 const STORAGE_KEY_OWNED_TABS = 'ownedTabs';
 const STORAGE_KEY_BULK_QUEUE = 'bulkQueue';
+const STORAGE_KEY_HISTORY = 'downloadHistory';
+const STORAGE_KEY_BLOB_HANDOFF = 'blobHandoffUnsupported';
 
 export const state = {
     capturedRequests: {},
@@ -19,7 +21,9 @@ export const state = {
         configured: false
     },
     bulkQueue: null,
-    activeTabInfo: null
+    activeTabInfo: null,
+    history: [],
+    blobHandoffUnsupported: false
 };
 
 let persistTimer = null;
@@ -76,12 +80,70 @@ export function persistStateNow() {
                 [STORAGE_KEY_ENABLED]: state.extensionEnabled,
                 [STORAGE_KEY_DESTINATION]: state.destination,
                 [STORAGE_KEY_OWNED_TABS]: Array.from(state.ownedTabs),
-                [STORAGE_KEY_BULK_QUEUE]: state.bulkQueue
+                [STORAGE_KEY_BULK_QUEUE]: state.bulkQueue,
+                [STORAGE_KEY_HISTORY]: state.history,
+                [STORAGE_KEY_BLOB_HANDOFF]: state.blobHandoffUnsupported
             });
         }
     } catch (e) {
         // Safe catch for headless / tests
     }
+}
+
+export function updateHistoryRecord(entry) {
+    if (!entry) return;
+    const key = entry.key || entry.fileId || (entry.name + '||' + (entry.url || ''));
+    if (!key) return;
+
+    if (!Array.isArray(state.history)) {
+        state.history = [];
+    }
+
+    const idx = state.history.findIndex(h => h.key === key);
+    const now = Date.now();
+    const existing = idx >= 0 ? state.history[idx] : null;
+
+    const record = {
+        key: key,
+        fileId: entry.fileId || (existing ? existing.fileId : null),
+        name: entry.name || (existing ? existing.name : 'Untitled Video'),
+        status: entry.status || (existing ? existing.status : 'unknown'),
+        error: entry.error !== undefined ? entry.error : (existing ? existing.error : null),
+        note: entry.note !== undefined ? entry.note : (existing ? existing.note : null),
+        attempts: entry.attempts !== undefined ? entry.attempts : (existing ? existing.attempts : 1),
+        bytes: entry.bytes !== undefined ? entry.bytes : (existing ? existing.bytes : 0),
+        finishedAt: entry.finishedAt || now,
+        source: entry.source || (existing ? existing.source : 'single')
+    };
+
+    if (idx >= 0) {
+        state.history[idx] = Object.assign(state.history[idx], record);
+    } else {
+        state.history.unshift(record);
+    }
+
+    if (state.history.length > 500) {
+        state.history = state.history.slice(0, 500);
+    }
+    schedulePersist();
+}
+
+export function clearHistoryRecords() {
+    if (Array.isArray(state.history)) {
+        state.history = state.history.filter(h => h.status !== 'completed' && h.status !== 'failed' && h.status !== 'cancelled');
+    }
+    const toDelete = [];
+    for (const rid in state.downloadProgress) {
+        const st = state.downloadProgress[rid] && state.downloadProgress[rid].status;
+        if (st === 'completed' || st === 'failed' || st === 'cancelled' || st === 'interrupted') {
+            toDelete.push(rid);
+        }
+    }
+    toDelete.forEach(rid => {
+        delete state.downloadProgress[rid];
+        delete state.capturedRequests[rid];
+    });
+    persistStateNow();
 }
 
 export function loadPersistedState(callback) {
@@ -96,7 +158,9 @@ export function loadPersistedState(callback) {
         STORAGE_KEY_ENABLED,
         STORAGE_KEY_DESTINATION,
         STORAGE_KEY_OWNED_TABS,
-        STORAGE_KEY_BULK_QUEUE
+        STORAGE_KEY_BULK_QUEUE,
+        STORAGE_KEY_HISTORY,
+        STORAGE_KEY_BLOB_HANDOFF
     ], (result) => {
         if (result[STORAGE_KEY_REQUESTS]) {
             state.capturedRequests = result[STORAGE_KEY_REQUESTS];
@@ -118,6 +182,14 @@ export function loadPersistedState(callback) {
 
         if (result[STORAGE_KEY_OWNED_TABS] && Array.isArray(result[STORAGE_KEY_OWNED_TABS])) {
             state.ownedTabs = new Set(result[STORAGE_KEY_OWNED_TABS]);
+        }
+
+        if (result[STORAGE_KEY_HISTORY] && Array.isArray(result[STORAGE_KEY_HISTORY])) {
+            state.history = result[STORAGE_KEY_HISTORY];
+        }
+
+        if (result[STORAGE_KEY_BLOB_HANDOFF] !== undefined) {
+            state.blobHandoffUnsupported = Boolean(result[STORAGE_KEY_BLOB_HANDOFF]);
         }
 
         if (result[STORAGE_KEY_BULK_QUEUE]) {

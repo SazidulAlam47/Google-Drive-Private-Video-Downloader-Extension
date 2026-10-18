@@ -2,11 +2,11 @@
 // Strictly sequential at the video level, handles background tab lifecycle,
 // capture & stall watchdogs, pause/resume/stop state transitions, and persistent recovery.
 
-import { state, persistStateNow, schedulePersist } from './state.js';
+import { state, persistStateNow, schedulePersist, updateHistoryRecord } from './state.js';
 import { attachCaptureForTab, registerCaptureWaiter, cancelCaptureWaitersForTab } from './capture.js';
 import { safePlaybackNudgeFn, DRIVE_SELECTORS } from './single.js';
 import { chunkedDownloadFn } from './download-engine.js';
-import { ERROR_CODES, getErrorMessage } from './errors.js';
+import { ERROR_CODES, getErrorMessage, classifyEngineError } from './errors.js';
 
 export const CAPTURE_TIMEOUT_MS = 45000;
 export const STALL_TIMEOUT_MS = 120000;
@@ -42,6 +42,7 @@ export class BulkQueueController {
         this.jobToken = 0;
         this.isAdvancing = false;
         this.activeTabId = null;
+        this.engineState = 'running'; // 'running' | 'paused'
         this.captureWatchdogTimer = null;
         this.stallWatchdogTimer = null;
         this.nudgeTimer = null;
@@ -101,17 +102,18 @@ export class BulkQueueController {
         }
 
         const activeItem = this.queue.items[this.queue.index];
-        if (activeItem && activeItem.state === 'downloading' && this.activeTabId) {
+        if (activeItem && (activeItem.state === 'downloading' || activeItem.state === 'saving') && this.activeTabId) {
             try {
                 await this.tabs.sendMessage(this.activeTabId, {
                     type: 'pauseDownload',
                     requestId: activeItem.requestId
                 });
             } catch (e) {}
+            this.engineState = 'paused';
             activeItem.state = 'paused';
             this.queue.state = 'paused';
             this.persistState();
-        } else if (!activeItem || (activeItem.state !== 'capturing' && activeItem.state !== 'saving')) {
+        } else if (!activeItem || (activeItem.state !== 'capturing' && activeItem.state !== 'opening')) {
             this.queue.state = 'paused';
             this.persistState();
         }
@@ -124,16 +126,51 @@ export class BulkQueueController {
         this.queue.restartedBanner = null;
 
         const activeItem = this.queue.items[this.queue.index];
-        if (activeItem && activeItem.state === 'paused' && this.activeTabId) {
-            activeItem.state = 'downloading';
-            this.persistState();
-            try {
-                await this.tabs.sendMessage(this.activeTabId, {
-                    type: 'resumeDownload',
-                    requestId: activeItem.requestId
-                });
-            } catch (e) {}
-            this.resetStallWatchdog();
+        if (activeItem && activeItem.state !== 'completed' && activeItem.state !== 'failed' && activeItem.state !== 'cancelled') {
+            if (activeItem.state === 'paused') {
+                if (this.activeTabId) {
+                    if (activeItem.requestId && this.engineState === 'paused') {
+                        activeItem.state = 'downloading';
+                        this.engineState = 'running';
+                        this.persistState();
+                        try {
+                            await this.tabs.sendMessage(this.activeTabId, {
+                                type: 'resumeDownload',
+                                requestId: activeItem.requestId
+                            });
+                        } catch (e) {}
+                        this.resetStallWatchdog();
+                    } else if (activeItem.requestId) {
+                        activeItem.state = 'downloading';
+                        this.engineState = 'running';
+                        this.persistState();
+                        this.resetStallWatchdog();
+                        try {
+                            await this.tabs.sendMessage(this.activeTabId, {
+                                type: 'resumeDownload',
+                                requestId: activeItem.requestId
+                            });
+                        } catch (e) {}
+                    }
+                } else {
+                    activeItem.state = 'queued';
+                    this.persistState();
+                    await this.advance();
+                }
+            } else {
+                // In-flight but was paused
+                if (this.activeTabId && this.engineState === 'paused' && activeItem.requestId) {
+                    this.engineState = 'running';
+                    try {
+                        await this.tabs.sendMessage(this.activeTabId, {
+                            type: 'resumeDownload',
+                            requestId: activeItem.requestId
+                        });
+                    } catch (e) {}
+                    this.resetStallWatchdog();
+                }
+                this.persistState();
+            }
         } else {
             this.persistState();
             await this.advance();
@@ -207,7 +244,8 @@ export class BulkQueueController {
         this.stallWatchdogTimer = this.clock.setTimeout(async () => {
             if (currentToken !== this.jobToken) return;
             if (!this.queue || this.queue.state === 'paused') return;
-            await this.handleItemTerminal(currentItem, 'interrupted', 'DOWNLOAD_STALLED');
+            if (!currentItem || currentItem.state !== 'downloading') return;
+            await this.handleItemTerminal(currentItem, 'interrupted', 'DOWNLOAD_STALLED', 'DOWNLOAD_STALLED', currentToken);
         }, STALL_TIMEOUT_MS);
     }
 
@@ -265,6 +303,7 @@ export class BulkQueueController {
             }
 
             if (this.queue.state === 'stopping') {
+                this.jobToken++;
                 this.queue.state = 'finished';
                 this.persistState();
                 return;
@@ -285,6 +324,7 @@ export class BulkQueueController {
             }
 
             if (nextIdx === -1) {
+                this.jobToken++;
                 this.queue.state = 'finished';
                 await this.closeAllOwnedTabs();
                 this.persistState();
@@ -305,6 +345,7 @@ export class BulkQueueController {
 
         item.state = 'opening';
         item.attempts = (item.attempts || 0) + 1;
+        this.engineState = 'running';
         this.persistState();
 
         this.clearActiveTimers();
@@ -349,7 +390,7 @@ export class BulkQueueController {
                 if (currentToken !== this.jobToken) return;
                 // Capture watchdog must never fire during downloading or saving
                 if (item.state !== 'capturing') return;
-                await this.handleItemTerminal(item, 'interrupted', ERROR_CODES.CAPTURE_TIMEOUT);
+                await this.handleItemTerminal(item, 'interrupted', ERROR_CODES.CAPTURE_TIMEOUT, null, currentToken);
             }, CAPTURE_TIMEOUT_MS);
 
             // Safe playback nudge after 8s if no capture yet
@@ -370,14 +411,14 @@ export class BulkQueueController {
             }, (err) => {
                 if (currentToken !== this.jobToken) return;
                 if (item.state === 'capturing') {
-                    this.handleItemTerminal(item, 'interrupted', (err && err.message) || ERROR_CODES.CAPTURE_TIMEOUT);
+                    this.handleItemTerminal(item, 'interrupted', (err && err.message) || ERROR_CODES.CAPTURE_TIMEOUT, null, currentToken);
                 }
             }, CAPTURE_TIMEOUT_MS);
 
         } catch (err) {
             this.clearActiveTimers();
             if (currentToken === this.jobToken) {
-                await this.handleItemTerminal(item, 'interrupted', err.message || 'PROCESS_ITEM_FAILED');
+                await this.handleItemTerminal(item, 'interrupted', err.message || 'PROCESS_ITEM_FAILED', null, currentToken);
             }
         }
     }
@@ -390,13 +431,24 @@ export class BulkQueueController {
         if (!this.queue || (this.queue.state !== 'running' && this.queue.state !== 'pausing')) return;
 
         if (!capture || !capture.lastItagUrl) {
-            await this.handleItemTerminal(item, 'interrupted', ERROR_CODES.CAPTURE_TIMEOUT);
+            await this.handleItemTerminal(item, 'interrupted', ERROR_CODES.CAPTURE_TIMEOUT, null, token);
+            return;
+        }
+
+        // If pause was called while capturing:
+        if (this.queue.state === 'pausing') {
+            item.state = 'paused';
+            item.requestId = capture.requestId;
+            this.queue.state = 'paused';
+            this.engineState = 'paused';
+            this.persistState();
             return;
         }
 
         // Step 3: Downloading phase
         item.state = 'downloading';
         item.requestId = capture.requestId;
+        this.engineState = 'running';
         this.persistState();
 
         // Progress-stall watchdog
@@ -410,25 +462,73 @@ export class BulkQueueController {
                 args: [capture.lastItagUrl, capture.videoTitle || item.name, capture.requestId]
             });
         } catch (err) {
-            await this.handleItemTerminal(item, 'interrupted', err.message || 'DOWNLOAD_INIT_FAILED');
+            await this.handleItemTerminal(item, 'interrupted', err.message || 'DOWNLOAD_INIT_FAILED', null, token);
         }
     }
 
-    onProgressUpdate(requestId, percent, bytes, status) {
+    onEngineEvent(requestId, { status, percent, bytes, completed, total, error } = {}) {
         if (!this.queue) return;
         const activeItem = this.queue.items[this.queue.index];
         if (!activeItem || activeItem.requestId !== requestId) return;
 
-        if (status) activeItem.state = status;
-        if (typeof percent === 'number') activeItem.percent = percent;
-        if (typeof bytes === 'number') activeItem.bytes = bytes;
+        // Never assign raw engine status to item.state
+        if (status === 'starting' || status === 'downloading') {
+            if (activeItem.state !== 'paused' && this.queue.state !== 'paused' && this.queue.state !== 'pausing') {
+                activeItem.state = 'downloading';
+            }
+            if (typeof percent === 'number') activeItem.percent = percent;
+            if (typeof bytes === 'number') activeItem.bytes = bytes;
+            else if (typeof completed === 'number') activeItem.bytes = completed;
 
-        // Reset stall watchdog on every progress message
-        this.resetStallWatchdog();
-        schedulePersist();
+            if (activeItem.state === 'downloading') {
+                this.resetStallWatchdog();
+            }
+            schedulePersist();
+            return;
+        }
+
+        if (status === 'paused') {
+            this.engineState = 'paused';
+            return;
+        }
+
+        if (status === 'saving') {
+            activeItem.state = 'saving';
+            if (typeof percent === 'number') activeItem.percent = percent;
+            if (typeof bytes === 'number') activeItem.bytes = bytes;
+            else if (typeof completed === 'number') activeItem.bytes = completed;
+            schedulePersist();
+            return;
+        }
+
+        if (status === 'error') {
+            const classified = classifyEngineError(error);
+            this.handleItemTerminal(activeItem, 'interrupted', classified, error, this.jobToken);
+            return;
+        }
+
+        if (status === 'cancelled') {
+            if (this.queue.state === 'stopping' || this.queue.state === 'finished') {
+                return;
+            }
+            this.handleItemTerminal(activeItem, 'interrupted', 'DOWNLOAD_CANCELLED', error || 'Download cancelled', this.jobToken);
+            return;
+        }
     }
 
-    async handleItemTerminal(item, resultState, errorReason = null) {
+    onProgressUpdate(requestId, percent, bytes, status) {
+        this.onEngineEvent(requestId, { percent, bytes, status });
+    }
+
+    async handleItemTerminal(item, resultState, errorReason = null, rawErrorMessage = null, token = null) {
+        if (token !== null && token !== undefined && token !== this.jobToken) {
+            return;
+        }
+
+        if (!item || item.state === 'completed' || item.state === 'failed' || item.state === 'cancelled') {
+            return;
+        }
+
         this.clearActiveTimers();
 
         const currentTabId = this.activeTabId;
@@ -437,6 +537,14 @@ export class BulkQueueController {
             item.state = 'completed';
             item.percent = 100;
             item.error = null;
+            updateHistoryRecord({
+                fileId: item.fileId,
+                name: item.name,
+                status: 'completed',
+                attempts: item.attempts,
+                bytes: item.bytes,
+                source: 'bulk'
+            });
             this.persistState();
 
             // Terminal tab cleanup: only after complete event
@@ -449,22 +557,43 @@ export class BulkQueueController {
         const isTransient = (
             errorReason === ERROR_CODES.CAPTURE_TIMEOUT ||
             errorReason === ERROR_CODES.URL_EXPIRED ||
+            errorReason === ERROR_CODES.NETWORK_ERROR_RETRYABLE ||
+            errorReason === 'NETWORK_ERROR_RETRYABLE' ||
             errorReason === 'DOWNLOAD_STALLED' ||
             errorReason === 'TAB_CLOSED' ||
             errorReason === 'DEBUGGER_DETACHED' ||
-            (typeof errorReason === 'string' && errorReason.includes('failed after 4 retries'))
+            (typeof errorReason === 'string' && errorReason.includes('failed after'))
         );
 
         await this.closeOwnedTab(currentTabId);
 
-        if (isTransient && (item.attempts || 0) < MAX_VIDEO_RETRIES && this.queue.state === 'running') {
+        if (isTransient && (item.attempts || 0) < MAX_VIDEO_RETRIES && (this.queue.state === 'running' || this.queue.state === 'pausing')) {
             item.state = 'queued'; // retry with fresh owned tab
             item.percent = 0;
+            item.error = rawErrorMessage || errorReason;
+            updateHistoryRecord({
+                fileId: item.fileId,
+                name: item.name,
+                status: 'queued',
+                error: rawErrorMessage || errorReason,
+                attempts: item.attempts,
+                bytes: item.bytes,
+                source: 'bulk'
+            });
             this.persistState();
             await this.advance();
         } else {
             item.state = 'failed';
-            item.error = errorReason || 'DOWNLOAD_FAILED';
+            item.error = rawErrorMessage || errorReason || 'DOWNLOAD_FAILED';
+            updateHistoryRecord({
+                fileId: item.fileId,
+                name: item.name,
+                status: 'failed',
+                error: rawErrorMessage || errorReason || 'DOWNLOAD_FAILED',
+                attempts: item.attempts,
+                bytes: item.bytes,
+                source: 'bulk'
+            });
             this.persistState();
             // Failure never blocks the queue; advance to next
             await this.advance();
@@ -483,8 +612,9 @@ export class BulkQueueController {
             if (this.activeTabId === tabId) {
                 this.activeTabId = null;
                 const activeItem = this.queue && this.queue.items[this.queue.index];
-                if (activeItem && (activeItem.state === 'opening' || activeItem.state === 'capturing' || activeItem.state === 'downloading')) {
-                    await this.handleItemTerminal(activeItem, 'interrupted', 'TAB_CLOSED');
+                const inFlightStates = ['opening', 'capturing', 'downloading', 'saving', 'paused'];
+                if (activeItem && inFlightStates.includes(activeItem.state)) {
+                    await this.handleItemTerminal(activeItem, 'interrupted', 'TAB_CLOSED', 'Tab was closed during download', this.jobToken);
                 }
             }
         }
@@ -493,8 +623,9 @@ export class BulkQueueController {
     async onDebuggerDetach(tabId, reason) {
         if (this.stateRef.ownedTabs.has(tabId) && this.activeTabId === tabId) {
             const activeItem = this.queue && this.queue.items[this.queue.index];
-            if (activeItem && (activeItem.state === 'capturing' || activeItem.state === 'downloading')) {
-                await this.handleItemTerminal(activeItem, 'interrupted', reason === 'canceled_by_user' ? 'canceled_by_user' : 'DEBUGGER_DETACHED');
+            const inFlightStates = ['opening', 'capturing', 'downloading', 'saving', 'paused'];
+            if (activeItem && inFlightStates.includes(activeItem.state)) {
+                await this.handleItemTerminal(activeItem, 'interrupted', reason === 'canceled_by_user' ? 'canceled_by_user' : 'DEBUGGER_DETACHED', 'Debugger detached', this.jobToken);
             }
         }
     }

@@ -1,7 +1,7 @@
 // Service worker entry point for Drive Private Video Downloader.
 // Manages capture, lifecycle listeners, tab state, and message dispatch.
 
-import { state, schedulePersist, persistStateNow, loadPersistedState, countActiveDownloads } from './src/state.js';
+import { state, schedulePersist, persistStateNow, loadPersistedState, countActiveDownloads, clearHistoryRecords } from './src/state.js';
 import { attachCaptureForTab, detachCaptureForTab, detachAllPassiveCaptures, reconcileDebuggerTargets, handleDebuggerDetach, handleDebuggerEvent, extractDriveFileId } from './src/capture.js';
 import { chunkedDownloadFn } from './src/download-engine.js';
 import { ERROR_CODES, getErrorMessage } from './src/errors.js';
@@ -10,14 +10,39 @@ import { handleSingleDownload } from './src/single.js';
 import { executeFolderScan } from './src/bulk-scan.js';
 import { BulkQueueController } from './src/bulk-queue.js';
 import { registerCaptureWaiter } from './src/capture.js';
+import { DownloadEventsManager } from './src/download-events.js';
 
 const MAX_CONCURRENT_DOWNLOADS = 3;
 
 // Cached folder scan result ready for bulk start
 export let lastScanResult = null;
 
-// Map downloadId -> { requestId, tabId, blobUrl, filename }
-export const activeDownloads = new Map();
+export async function saveScanResult(result) {
+    lastScanResult = result;
+    try {
+        const storageArea = (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.session) ?
+            chrome.storage.session : (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local);
+        if (storageArea && storageArea.set) {
+            await new Promise((res) => storageArea.set({ lastScanResult: result }, res));
+        }
+    } catch (e) {}
+}
+
+export async function loadScanResult() {
+    if (lastScanResult && lastScanResult.timestamp) return lastScanResult;
+    try {
+        const storageArea = (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.session) ?
+            chrome.storage.session : (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local);
+        if (storageArea && storageArea.get) {
+            const data = await new Promise((res) => storageArea.get('lastScanResult', res));
+            if (data && data.lastScanResult) {
+                lastScanResult = data.lastScanResult;
+                return lastScanResult;
+            }
+        }
+    } catch (e) {}
+    return null;
+}
 
 // Listeners for download terminal states (used by bulk queue controller)
 const downloadTerminalListeners = new Set();
@@ -38,12 +63,29 @@ export const bulkController = new BulkQueueController({
     waitCapture: registerCaptureWaiter
 });
 
+// Download events manager instance
+export const downloadEventsManager = new DownloadEventsManager({
+    stateRef: state,
+    downloads: typeof chrome !== 'undefined' ? chrome.downloads : null,
+    tabs: typeof chrome !== 'undefined' ? chrome.tabs : null,
+    bulkController: bulkController,
+    persistState: persistStateNow,
+    schedulePersistRef: schedulePersist,
+    onTerminal: (requestId, resultState, errorReason) => {
+        downloadTerminalListeners.forEach(listener => {
+            try { listener(requestId, resultState, errorReason); } catch (e) {}
+        });
+    }
+});
+
+export const activeDownloads = downloadEventsManager.activeDownloads;
+
 // Register terminal listener for bulk queue
 registerDownloadTerminalListener((requestId, resultState, errorReason) => {
     if (bulkController.queue && bulkController.queue.state !== 'finished') {
         const activeItem = bulkController.queue.items[bulkController.queue.index];
         if (activeItem && activeItem.requestId === requestId) {
-            bulkController.handleItemTerminal(activeItem, resultState, errorReason);
+            bulkController.handleItemTerminal(activeItem, resultState, errorReason, null, bulkController.jobToken);
         }
     }
 });
@@ -98,14 +140,49 @@ export async function updateActiveTabInfo() {
     return state.activeTabInfo;
 }
 
+export async function cleanupStartupOwnedTabs(tabsApi = (typeof chrome !== 'undefined' && chrome.tabs), debuggerApi = (typeof chrome !== 'undefined' && chrome.debugger), stateRef = state) {
+    if (!tabsApi || !stateRef || !stateRef.ownedTabs || stateRef.ownedTabs.size === 0) return;
+    const tabIds = Array.from(stateRef.ownedTabs);
+    const folderTabId = stateRef.bulkQueue ? stateRef.bulkQueue.folderTabId : null;
+
+    for (const tabId of tabIds) {
+        if (folderTabId && tabId === folderTabId) continue;
+        try {
+            const tab = await new Promise((resolve) => {
+                tabsApi.get(tabId, (t) => {
+                    const lastError = (tabsApi.runtime && tabsApi.runtime.lastError) || (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.lastError);
+                    if (lastError || !t) resolve(null);
+                    else resolve(t);
+                });
+            });
+            if (tab) {
+                if (debuggerApi && debuggerApi.detach) {
+                    try {
+                        await new Promise((resolve) => debuggerApi.detach({ tabId }, () => resolve()));
+                    } catch (e) {}
+                }
+                if (tabsApi.remove) {
+                    try {
+                        await new Promise((resolve) => tabsApi.remove(tabId, () => resolve()));
+                    } catch (e) {}
+                }
+            }
+        } catch (e) {}
+    }
+    stateRef.ownedTabs.clear();
+    persistStateNow();
+}
+
 // Startup reconciliation
-loadPersistedState(() => {
+loadPersistedState(async () => {
+    await cleanupStartupOwnedTabs();
     reconcileDebuggerTargets();
     updateActiveTabInfo();
 });
 
 // Runtime message listener
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
+    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!message || !message.type) return;
 
     if (message.type === 'getState') {
@@ -116,7 +193,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 progress: state.downloadProgress,
                 destination: state.destination,
                 bulkQueue: state.bulkQueue,
-                activeTabInfo: activeInfo
+                activeTabInfo: activeInfo,
+                history: state.history,
+                blobHandoffUnsupported: state.blobHandoffUnsupported
             });
         });
         return true;
@@ -129,124 +208,129 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return true;
     }
 
+    // Legacy polling fallback
+    if (message.type === 'getRequests') {
+        sendResponse(state.capturedRequests);
+        return;
+    }
+    if (message.type === 'getProgress') {
+        sendResponse(state.downloadProgress);
+        return;
+    }
+
     if (message.type === 'setEnabled') {
-        const targetEnabled = Boolean(message.enabled);
-        state.extensionEnabled = targetEnabled;
+        state.extensionEnabled = Boolean(message.enabled);
         persistStateNow();
 
-        if (targetEnabled) {
-            // Service worker resolves the active tab itself
+        if (state.extensionEnabled) {
             chrome.tabs.query({ active: true, lastFocusedWindow: true }, (tabs) => {
-                const tab = tabs[0];
-                if (!tab || !tab.url || !tab.url.startsWith('https://drive.google.com/')) {
+                const activeTab = tabs && tabs[0];
+                if (!activeTab || !activeTab.id || !activeTab.url || !activeTab.url.startsWith("https://drive.google.com/")) {
                     sendResponse({ success: true, isDriveTab: false });
                     return;
                 }
-
-                attachCaptureForTab(tab.id)
-                    .then(() => {
-                        sendResponse({ success: true, isDriveTab: true });
-                    })
-                    .catch((err) => {
-                        sendResponse({ success: false, error: err.message || 'ATTACH_FAILED' });
-                    });
+                attachCaptureForTab(activeTab.id)
+                    .then(() => sendResponse({ success: true, isDriveTab: true }))
+                    .catch((err) => sendResponse({ success: false, error: err.message }));
             });
             return true;
         } else {
-            // OFF must work from any tab: detach all passive captures and reconcile
             detachAllPassiveCaptures();
+            reconcileDebuggerTargets();
             sendResponse({ success: true });
-            return true;
+            return;
         }
     }
 
-    if (message.type === 'getRequests') {
-        sendResponse({ requests: state.capturedRequests });
-        return;
-    }
-
-    if (message.type === 'getProgress') {
-        sendResponse({ progress: state.downloadProgress });
-        return;
+    if (message.type === 'singleDownload') {
+        chrome.tabs.query({ active: true, lastFocusedWindow: true }, async (tabs) => {
+            const activeTab = tabs && tabs[0];
+            const result = await handleSingleDownload(activeTab);
+            sendResponse(result);
+        });
+        return true;
     }
 
     if (message.type === 'startDownload') {
-        const requestId = message.requestId;
-        const req = state.capturedRequests[requestId];
+        const req = state.capturedRequests[message.requestId];
         if (!req || !req.lastItagUrl) {
-            sendResponse({ success: false, error: 'No URL captured for this request.' });
-            return;
-        }
-
-        const existing = state.downloadProgress[requestId];
-        if (existing && (existing.status === 'starting' || existing.status === 'downloading' || existing.status === 'saving' || existing.status === 'paused')) {
-            sendResponse({ success: false, error: 'Download already in progress.' });
+            sendResponse({ success: false, error: ERROR_CODES.NO_MEDIA_REQUEST_CAPTURED });
             return;
         }
 
         const activeCount = countActiveDownloads();
         if (activeCount >= MAX_CONCURRENT_DOWNLOADS) {
-            sendResponse({
-                success: false,
-                error: getErrorMessage(ERROR_CODES.MAX_CONCURRENT_REACHED),
-                limitReached: true
-            });
+            sendResponse({ success: false, error: ERROR_CODES.MAX_CONCURRENT_REACHED, limitReached: true });
             return;
         }
 
-        state.downloadProgress[requestId] = {
+        const currentProg = state.downloadProgress[message.requestId];
+        if (currentProg && (currentProg.status === 'starting' || currentProg.status === 'downloading' || currentProg.status === 'saving')) {
+            sendResponse({ success: false, error: ERROR_CODES.ALREADY_IN_PROGRESS });
+            return;
+        }
+
+        state.downloadProgress[message.requestId] = {
             status: 'starting',
             completed: 0,
             total: 0,
             percent: 0,
             error: null,
-            title: req.videoTitle,
-            quality: req.quality || '',
+            title: req.videoTitle || 'Untitled Video',
             lastUpdated: Date.now()
         };
-        persistStateNow();
+        schedulePersist();
 
         chrome.scripting.executeScript({
             target: { tabId: req.tabId },
             func: chunkedDownloadFn,
-            args: [req.lastItagUrl, req.videoTitle, requestId]
-        }).catch(err => {
-            const p = state.downloadProgress[requestId] || {};
-            p.status = 'error';
-            p.error = (err && err.message) ? err.message : String(err);
-            p.lastUpdated = Date.now();
-            state.downloadProgress[requestId] = p;
+            args: [req.lastItagUrl, req.videoTitle || 'video', req.requestId]
+        }).then(() => {
+            sendResponse({ success: true });
+        }).catch((err) => {
+            state.downloadProgress[message.requestId].status = 'interrupted';
+            state.downloadProgress[message.requestId].error = err.message;
             persistStateNow();
+            sendResponse({ success: false, error: err.message });
         });
+        return true;
+    }
 
+    if (message.type === 'pauseDownload') {
+        const req = state.capturedRequests[message.requestId];
+        if (req && req.tabId) {
+            try {
+                chrome.tabs.sendMessage(req.tabId, {
+                    type: 'pauseDownload',
+                    requestId: message.requestId
+                }, () => { void chrome.runtime.lastError; });
+            } catch (e) {}
+        }
         sendResponse({ success: true });
         return;
     }
 
-    if (message.type === 'pauseDownload' ||
-        message.type === 'resumeDownload' ||
-        message.type === 'cancelDownload') {
-
-        const rid = message.requestId;
-        const req = state.capturedRequests[rid];
-
-        if (state.downloadProgress[rid]) {
-            if (message.type === 'pauseDownload') {
-                state.downloadProgress[rid].status = 'paused';
-            } else if (message.type === 'resumeDownload') {
-                state.downloadProgress[rid].status = 'downloading';
-            } else if (message.type === 'cancelDownload') {
-                state.downloadProgress[rid].status = 'cancelled';
-            }
-            state.downloadProgress[rid].lastUpdated = Date.now();
-            schedulePersist();
-        }
-
+    if (message.type === 'resumeDownload') {
+        const req = state.capturedRequests[message.requestId];
         if (req && req.tabId) {
             try {
                 chrome.tabs.sendMessage(req.tabId, {
-                    type: message.type,
-                    requestId: rid
+                    type: 'resumeDownload',
+                    requestId: message.requestId
+                }, () => { void chrome.runtime.lastError; });
+            } catch (e) {}
+        }
+        sendResponse({ success: true });
+        return;
+    }
+
+    if (message.type === 'cancelDownload') {
+        const req = state.capturedRequests[message.requestId];
+        if (req && req.tabId) {
+            try {
+                chrome.tabs.sendMessage(req.tabId, {
+                    type: 'cancelDownload',
+                    requestId: message.requestId
                 }, () => { void chrome.runtime.lastError; });
             } catch (e) {}
         }
@@ -255,141 +339,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     if (message.type === 'clearHistory') {
-        const activeRequestIds = new Set();
-        Object.keys(state.downloadProgress).forEach(rid => {
-            const st = state.downloadProgress[rid] && state.downloadProgress[rid].status;
-            if (st === 'starting' || st === 'downloading' || st === 'saving' || st === 'paused') {
-                activeRequestIds.add(rid);
-            } else {
-                delete state.downloadProgress[rid];
-            }
-        });
-
-        Object.keys(state.capturedRequests).forEach(rid => {
-            if (!activeRequestIds.has(rid)) {
-                delete state.capturedRequests[rid];
-            }
-        });
-
-        persistStateNow();
+        clearHistoryRecords();
         sendResponse({ success: true });
         return;
     }
 
     if (message.type === 'downloadProgressUpdate') {
-        const rid = message.requestId;
-        if (!state.downloadProgress[rid]) {
-            state.downloadProgress[rid] = { status: 'starting', completed: 0, total: 0, percent: 0, error: null };
-        }
-        if (message.status)  state.downloadProgress[rid].status    = message.status;
-        if (typeof message.completed === 'number') state.downloadProgress[rid].completed = message.completed;
-        if (typeof message.total     === 'number') state.downloadProgress[rid].total     = message.total;
-        if (typeof message.percent   === 'number') state.downloadProgress[rid].percent   = message.percent;
-        if (message.error !== undefined)            state.downloadProgress[rid].error     = message.error;
-        state.downloadProgress[rid].lastUpdated = Date.now();
-        schedulePersist();
-
-        if (typeof message.percent === 'number') {
-            bulkController.onProgressUpdate(rid, message.percent, message.completed, message.status);
-        }
+        downloadEventsManager.handleProgressUpdate(message, sender);
         return;
     }
 
     if (message.type === 'downloadBlobReady') {
-        const { requestId, blobUrl, filename, size } = message;
-        const req = state.capturedRequests[requestId];
-        const tabId = req ? req.tabId : (sender && sender.tab ? sender.tab.id : null);
-
-        const pathInfo = buildDownloadPath(state.destination, filename);
-        const targetFilename = pathInfo.filename;
-        const saveAs = pathInfo.saveAs;
-
-        if (!state.downloadProgress[requestId]) {
-            state.downloadProgress[requestId] = {
-                status: 'saving',
-                completed: size,
-                total: size,
-                percent: 100,
-                error: null,
-                title: filename,
-                lastUpdated: Date.now()
-            };
-        } else {
-            state.downloadProgress[requestId].status = 'saving';
-            state.downloadProgress[requestId].percent = 100;
-            state.downloadProgress[requestId].lastUpdated = Date.now();
-        }
-        persistStateNow();
-
-        try {
-            chrome.downloads.download({
-                url: blobUrl,
-                filename: targetFilename,
-                saveAs: saveAs,
-                conflictAction: 'uniquify'
-            }, (downloadId) => {
-                const err = chrome.runtime.lastError;
-                if (err || !downloadId) {
-                    const errMsg = (err && err.message) ? err.message : 'DOWNLOAD_INIT_FAILED';
-                    const isCancelled = errMsg.toLowerCase().includes('cancel') || errMsg.includes('USER_CANCELED');
-
-                    if (isCancelled) {
-                        state.downloadProgress[requestId].status = 'cancelled';
-                        state.downloadProgress[requestId].error = getErrorMessage(ERROR_CODES.DESTINATION_CANCELLED);
-                        state.downloadProgress[requestId].lastUpdated = Date.now();
-                        persistStateNow();
-
-                        if (tabId) {
-                            chrome.tabs.sendMessage(tabId, {
-                                type: 'saveResult',
-                                requestId: requestId,
-                                success: false,
-                                error: 'DESTINATION_CANCELLED'
-                            }, () => void chrome.runtime.lastError);
-                        }
-                    } else {
-                        // Fallback to in-tab anchor save (default Downloads folder)
-                        if (tabId) {
-                            chrome.tabs.sendMessage(tabId, {
-                                type: 'saveResult',
-                                requestId: requestId,
-                                fallbackToAnchor: true
-                            }, () => void chrome.runtime.lastError);
-                        }
-
-                        state.downloadProgress[requestId].status = 'completed';
-                        state.downloadProgress[requestId].note = 'Saved to default Downloads folder (custom folder not applied)';
-                        state.downloadProgress[requestId].lastUpdated = Date.now();
-                        state.downloadProgress[requestId].error = null;
-                        persistStateNow();
-                    }
-                    return;
-                }
-
-                activeDownloads.set(downloadId, {
-                    requestId,
-                    tabId,
-                    blobUrl,
-                    filename: targetFilename
-                });
-
-                state.downloadProgress[requestId].downloadId = downloadId;
-                persistStateNow();
-            });
-        } catch (e) {
-            // Synchronous error from chrome.downloads.download
-            if (tabId) {
-                chrome.tabs.sendMessage(tabId, {
-                    type: 'saveResult',
-                    requestId: requestId,
-                    fallbackToAnchor: true
-                }, () => void chrome.runtime.lastError);
-            }
-            state.downloadProgress[requestId].status = 'completed';
-            state.downloadProgress[requestId].note = 'Saved to default Downloads folder (custom folder not applied)';
-            state.downloadProgress[requestId].lastUpdated = Date.now();
-            persistStateNow();
-        }
+        downloadEventsManager.handleBlobReady(message, sender);
         return;
     }
 
@@ -403,66 +364,49 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             };
             persistStateNow();
         }
-        sendResponse({ success: true, destination: state.destination });
+        sendResponse({ success: true });
         return;
-    }
-
-    if (message.type === 'singleDownload') {
-        handleSingleDownload().then(res => {
-            sendResponse(res);
-        }).catch(err => {
-            sendResponse({ success: false, error: 'DOWNLOAD_INIT_FAILED', message: err.message });
-        });
-        return true;
     }
 
     if (message.type === 'bulkScan') {
         chrome.tabs.query({ active: true, lastFocusedWindow: true }, async (tabs) => {
             const tab = tabs && tabs[0];
-            if (!tab || !tab.id || !tab.url) {
-                sendResponse({ success: false, error: ERROR_CODES.NOT_A_DRIVE_FOLDER });
-                return;
-            }
-
-            const isFolderUrl = tab.url.includes('/drive/folders/') || (tab.url.includes('/drive/u/') && tab.url.includes('/folders/')) || tab.url.includes('/drive/my-drive');
-            if (!isFolderUrl) {
-                sendResponse({ success: false, error: ERROR_CODES.NOT_A_DRIVE_FOLDER });
-                return;
-            }
-
-            if (!state.destination || state.destination.configured === false) {
-                sendResponse({ success: false, needsDestination: true });
-                return;
-            }
-
-            if (state.destination.mode === 'askEachTime') {
+            if (!tab || !tab.id || !tab.url || !tab.url.startsWith('https://drive.google.com/')) {
                 sendResponse({
                     success: false,
+                    error: ERROR_CODES.NOT_A_DRIVE_FOLDER,
+                    message: getErrorMessage(ERROR_CODES.NOT_A_DRIVE_FOLDER)
+                });
+                return;
+            }
+
+            const analysis = analyzeTabUrl(tab.url, tab.title);
+            if (!analysis.isFolder) {
+                sendResponse({
+                    success: false,
+                    error: ERROR_CODES.NOT_A_DRIVE_FOLDER,
+                    message: getErrorMessage(ERROR_CODES.NOT_A_DRIVE_FOLDER)
+                });
+                return;
+            }
+
+            if (!state.destination.configured) {
+                sendResponse({
                     needsDestination: true,
-                    error: 'BULK_REQUIRES_SUBFOLDER',
-                    message: 'Bulk download requires a subfolder destination (Save-As dialog cannot be used for bulk).'
+                    destination: state.destination
                 });
                 return;
             }
 
             try {
                 const report = await executeFolderScan(tab.id);
-                if (report.videos.length === 0) {
-                    sendResponse({
-                        success: false,
-                        error: ERROR_CODES.NO_VIDEOS_IN_FOLDER,
-                        totalScanned: report.totalScanned,
-                        subfoldersSkipped: report.subfoldersSkipped
-                    });
-                    return;
-                }
-
                 lastScanResult = {
                     folderTabId: tab.id,
                     windowId: tab.windowId,
-                    folderTitle: tab.title || 'Drive Folder',
-                    report: report
+                    report: report,
+                    timestamp: Date.now()
                 };
+                await saveScanResult(lastScanResult);
 
                 sendResponse({
                     success: true,
@@ -482,21 +426,54 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     if (message.type === 'bulkStart') {
-        if (!lastScanResult || !lastScanResult.report || !lastScanResult.report.videos.length) {
-            sendResponse({ success: false, error: ERROR_CODES.NO_VIDEOS_IN_FOLDER });
-            return;
-        }
+        loadScanResult().then(async (scan) => {
+            const now = Date.now();
+            const isFresh = scan && scan.timestamp && (now - scan.timestamp < 10 * 60 * 1000);
+            if (!scan || !isFresh) {
+                sendResponse({
+                    success: false,
+                    error: ERROR_CODES.SCAN_STALE_OR_TAB_CLOSED,
+                    message: getErrorMessage(ERROR_CODES.SCAN_STALE_OR_TAB_CLOSED)
+                });
+                return;
+            }
 
-        bulkController.initQueue(
-            lastScanResult.folderTabId,
-            lastScanResult.windowId,
-            state.destination,
-            lastScanResult.report.videos
-        );
+            // Verify folder tab still exists
+            let tabExists = false;
+            try {
+                const tab = await new Promise(r => chrome.tabs.get(scan.folderTabId, t => {
+                    const lastError = (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.lastError);
+                    if (lastError || !t) r(null);
+                    else r(t);
+                }));
+                tabExists = Boolean(tab);
+            } catch (e) {}
 
-        bulkController.start().catch(() => {});
-        sendResponse({ success: true });
-        return;
+            if (!tabExists) {
+                sendResponse({
+                    success: false,
+                    error: ERROR_CODES.SCAN_STALE_OR_TAB_CLOSED,
+                    message: getErrorMessage(ERROR_CODES.SCAN_STALE_OR_TAB_CLOSED)
+                });
+                return;
+            }
+
+            if (!scan.report || !scan.report.videos || !scan.report.videos.length) {
+                sendResponse({ success: false, error: ERROR_CODES.NO_VIDEOS_IN_FOLDER });
+                return;
+            }
+
+            bulkController.initQueue(
+                scan.folderTabId,
+                scan.windowId,
+                state.destination,
+                scan.report.videos
+            );
+
+            bulkController.start().catch(() => {});
+            sendResponse({ success: true });
+        });
+        return true;
     }
 
     if (message.type === 'bulkPause') {
@@ -532,122 +509,82 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ success: false });
         return;
     }
-});
+    });
+}
 
 // Chrome debugger event & detach listeners
-chrome.debugger.onEvent.addListener(handleDebuggerEvent);
-chrome.debugger.onDetach.addListener((debuggeeId, reason) => {
-    handleDebuggerDetach(debuggeeId, reason);
-    if (debuggeeId && debuggeeId.tabId) {
-        bulkController.onDebuggerDetach(debuggeeId.tabId, reason);
+if (typeof chrome !== 'undefined' && chrome.debugger) {
+    if (chrome.debugger.onEvent) chrome.debugger.onEvent.addListener(handleDebuggerEvent);
+    if (chrome.debugger.onDetach) {
+        chrome.debugger.onDetach.addListener((debuggeeId, reason) => {
+            handleDebuggerDetach(debuggeeId, reason);
+            if (debuggeeId && debuggeeId.tabId) {
+                bulkController.onDebuggerDetach(debuggeeId.tabId, reason);
+            }
+        });
     }
-});
+}
 
 // Chrome downloads tracking for true completion states
 if (typeof chrome !== 'undefined' && chrome.downloads && chrome.downloads.onChanged) {
     chrome.downloads.onChanged.addListener((delta) => {
-        if (!delta || !delta.id) return;
-        const active = activeDownloads.get(delta.id);
-        if (!active) return;
-
-        const { requestId, tabId } = active;
-
-        if (delta.state) {
-            if (delta.state.current === 'complete') {
-                if (state.downloadProgress[requestId]) {
-                    state.downloadProgress[requestId].status = 'completed';
-                    state.downloadProgress[requestId].percent = 100;
-                    state.downloadProgress[requestId].error = null;
-                    state.downloadProgress[requestId].lastUpdated = Date.now();
-                }
-                persistStateNow();
-
-                if (tabId) {
-                    chrome.tabs.sendMessage(tabId, {
-                        type: 'saveResult',
-                        requestId: requestId,
-                        success: true
-                    }, () => void chrome.runtime.lastError);
-                }
-
-                activeDownloads.delete(delta.id);
-
-                downloadTerminalListeners.forEach(listener => {
-                    try { listener(requestId, 'completed', null); } catch (e) {}
-                });
-            } else if (delta.state.current === 'interrupted') {
-                const errorMsg = delta.error ? (delta.error.current || delta.error) : 'DOWNLOAD_INTERRUPTED';
-                if (state.downloadProgress[requestId]) {
-                    state.downloadProgress[requestId].status = 'interrupted';
-                    state.downloadProgress[requestId].error = String(errorMsg);
-                    state.downloadProgress[requestId].lastUpdated = Date.now();
-                }
-                persistStateNow();
-
-                if (tabId) {
-                    chrome.tabs.sendMessage(tabId, {
-                        type: 'saveResult',
-                        requestId: requestId,
-                        success: false,
-                        error: String(errorMsg)
-                    }, () => void chrome.runtime.lastError);
-                }
-
-                activeDownloads.delete(delta.id);
-
-                downloadTerminalListeners.forEach(listener => {
-                    try { listener(requestId, 'interrupted', String(errorMsg)); } catch (e) {}
-                });
-            }
-        }
+        downloadEventsManager.handleDownloadChanged(delta);
     });
 }
 
 // Tab lifecycle listeners
-chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-    if (changeInfo.status === "complete" && tab.url && tab.url.startsWith("https://drive.google.com/")) {
-        if (state.extensionEnabled && !state.ownedTabs.has(tabId)) {
-            attachCaptureForTab(tabId).catch(() => {});
-        }
-        updateActiveTabInfo();
-    } else if (changeInfo.url && !changeInfo.url.startsWith("https://drive.google.com/")) {
-        if (state.attachedTabs.has(tabId) && !state.ownedTabs.has(tabId)) {
-            detachCaptureForTab(tabId);
-        }
-        updateActiveTabInfo();
-    }
-});
-
-chrome.tabs.onActivated.addListener(() => {
-    updateActiveTabInfo();
-});
-
-chrome.tabs.onRemoved.addListener((tabId) => {
-    bulkController.onTabRemoved(tabId);
-
-    if (state.attachedTabs.has(tabId)) {
-        state.attachedTabs.delete(tabId);
+if (typeof chrome !== 'undefined' && chrome.tabs) {
+    if (chrome.tabs.onUpdated) {
+        chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+            if (changeInfo.status === "complete" && tab.url && tab.url.startsWith("https://drive.google.com/")) {
+                if (state.extensionEnabled && !state.ownedTabs.has(tabId)) {
+                    attachCaptureForTab(tabId).catch(() => {});
+                }
+                updateActiveTabInfo();
+            } else if (changeInfo.url && !changeInfo.url.startsWith("https://drive.google.com/")) {
+                if (state.attachedTabs.has(tabId) && !state.ownedTabs.has(tabId)) {
+                    detachCaptureForTab(tabId);
+                }
+                updateActiveTabInfo();
+            }
+        });
     }
 
-    const closedTabRequestIds = new Set();
-    Object.keys(state.capturedRequests).forEach(requestId => {
-        if (state.capturedRequests[requestId].tabId === tabId) {
-            closedTabRequestIds.add(requestId);
-            delete state.capturedRequests[requestId];
-        }
-    });
+    if (chrome.tabs.onActivated) {
+        chrome.tabs.onActivated.addListener(() => {
+            updateActiveTabInfo();
+        });
+    }
 
-    Object.keys(state.downloadProgress).forEach(rid => {
-        if (!closedTabRequestIds.has(rid)) return;
-        const p = state.downloadProgress[rid];
-        const st = p && p.status;
-        if (st === 'starting' || st === 'downloading' || st === 'saving' || st === 'paused') {
-            p.status = 'interrupted';
-            p.error = 'Tab was closed during download. Click Retry to restart.';
-            p.lastUpdated = Date.now();
-        }
-    });
+    if (chrome.tabs.onRemoved) {
+        chrome.tabs.onRemoved.addListener((tabId) => {
+            bulkController.onTabRemoved(tabId);
 
-    schedulePersist();
-    updateActiveTabInfo();
-});
+            if (state.attachedTabs.has(tabId)) {
+                state.attachedTabs.delete(tabId);
+            }
+
+            const closedTabRequestIds = new Set();
+            Object.keys(state.capturedRequests).forEach(requestId => {
+                if (state.capturedRequests[requestId].tabId === tabId) {
+                    closedTabRequestIds.add(requestId);
+                    delete state.capturedRequests[requestId];
+                }
+            });
+
+            Object.keys(state.downloadProgress).forEach(rid => {
+                if (!closedTabRequestIds.has(rid)) return;
+                const p = state.downloadProgress[rid];
+                const st = p && p.status;
+                if (st === 'starting' || st === 'downloading' || st === 'saving' || st === 'paused') {
+                    p.status = 'interrupted';
+                    p.error = 'Tab was closed during download. Click Retry to restart.';
+                    p.lastUpdated = Date.now();
+                }
+            });
+
+            schedulePersist();
+            updateActiveTabInfo();
+        });
+    }
+}

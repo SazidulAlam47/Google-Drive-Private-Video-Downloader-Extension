@@ -18,7 +18,10 @@ export const ERROR_CODES = {
     ALREADY_IN_PROGRESS: 'ALREADY_IN_PROGRESS',
     CAPTURE_NOT_AVAILABLE: 'CAPTURE_NOT_AVAILABLE',
     QUEUE_PAUSED: 'QUEUE_PAUSED',
-    QUEUE_STOPPED: 'QUEUE_STOPPED'
+    QUEUE_STOPPED: 'QUEUE_STOPPED',
+    NETWORK_ERROR_RETRYABLE: 'NETWORK_ERROR_RETRYABLE',
+    DOWNLOAD_FAILED_NON_RETRYABLE: 'DOWNLOAD_FAILED_NON_RETRYABLE',
+    SCAN_STALE_OR_TAB_CLOSED: 'SCAN_STALE_OR_TAB_CLOSED'
 };
 
 export const ERROR_MESSAGES = {
@@ -39,8 +42,41 @@ export const ERROR_MESSAGES = {
     [ERROR_CODES.ALREADY_IN_PROGRESS]: 'Download is already in progress for this video.',
     [ERROR_CODES.CAPTURE_NOT_AVAILABLE]: 'Capture is not available on this page.',
     [ERROR_CODES.QUEUE_PAUSED]: 'Bulk download queue is paused.',
-    [ERROR_CODES.QUEUE_STOPPED]: 'Bulk download queue was stopped by user.'
+    [ERROR_CODES.QUEUE_STOPPED]: 'Bulk download queue was stopped by user.',
+    [ERROR_CODES.NETWORK_ERROR_RETRYABLE]: 'Network error or chunk failure. Will retry download.',
+    [ERROR_CODES.DOWNLOAD_FAILED_NON_RETRYABLE]: 'Download failed with a non-recoverable server error.',
+    [ERROR_CODES.SCAN_STALE_OR_TAB_CLOSED]: 'Folder scan is stale or tab was closed. Please re-scan folder.'
 };
+
+export function classifyEngineError(text) {
+    if (!text) return 'DOWNLOAD_FAILED';
+    const lower = String(text).toLowerCase();
+    if (lower.includes('expired') || lower.includes('403') || lower.includes('forbidden') || lower.includes('url expired')) {
+        return ERROR_CODES.URL_EXPIRED;
+    }
+    if (
+        lower.includes('failed after') ||
+        lower.includes('retry') ||
+        lower.includes('retries') ||
+        lower.includes('network') ||
+        lower.includes('short read') ||
+        lower.includes('timeout') ||
+        lower.includes('fetch failed')
+    ) {
+        return ERROR_CODES.NETWORK_ERROR_RETRYABLE;
+    }
+    if (
+        lower.includes('range') ||
+        lower.includes('server ignored range') ||
+        lower.includes('404') ||
+        lower.includes('not found') ||
+        lower.includes('401') ||
+        lower.includes('unauthorized')
+    ) {
+        return ERROR_CODES.DOWNLOAD_FAILED_NON_RETRYABLE;
+    }
+    return 'DOWNLOAD_FAILED';
+}
 
 export function getErrorMessage(code, fallback = 'An unexpected error occurred.') {
     if (!code) return fallback;

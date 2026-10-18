@@ -157,3 +157,57 @@ This document contains the step-by-step verification checklist for manual testin
   1. Attempt downloading a large video file (>2 GB).
   2. Monitor Chrome Task Manager (`Shift + Esc`) for the video tab's memory usage.
   3. Verify whether the browser successfully allocates the in-memory Blob and writes to disk.
+
+---
+
+#### 14. Forced Fallback Save Path (Blob handoff rejection)
+* **Status**: `[NOT RUN - Manual Browser Test Required]`
+* **Procedure**:
+  1. Trigger or simulate a rejection by `chrome.downloads.download` (e.g. test on a Chrome build where blob URLs from isolated script execution are restricted or pass an invalid reserved device path).
+  2. Verify:
+     - The extension catches the rejection without hanging.
+     - The item falls back to in-tab anchor save and lands in Chrome's default Downloads folder.
+     - The queue marks the item `completed` with note: `"Saved to default Downloads folder (custom folder not applied)"`.
+     - `state.blobHandoffUnsupported` is set and persistent banner is shown in the side panel.
+     - Subsequent items in the queue skip `chrome.downloads` and proceed directly via anchor save without retrying or hanging.
+     - No duplicate downloads occur.
+
+---
+
+#### 15. Real Engine Error Mid-Bulk (Revoked access / Expired URL)
+* **Status**: `[NOT RUN - Manual Browser Test Required]`
+* **Procedure**:
+  1. Start a bulk download on a folder with >= 2 videos.
+  2. While the first video is downloading, revoke file access or simulate expired media stream token.
+  3. Verify:
+     - The engine sends an error with the expired token message.
+     - The queue catches the error immediately without waiting for the 120s stall watchdog.
+     - The item attempts a fresh tab retry (attempt 2).
+     - If failure persists, it marks the item as `failed` with the real error message displayed in the UI.
+     - The queue advances to video 2 without blocking.
+
+---
+
+#### 16. Pause Then Resume Race
+* **Status**: `[NOT RUN - Manual Browser Test Required]`
+* **Procedure**:
+  1. Start a bulk queue download.
+  2. While a video is actively downloading (around 30%), click **⏸ Pause**.
+  3. Observe that late progress messages do not flip the state back to `downloading`.
+  4. Wait 5 seconds, then click **▶ Resume**.
+  5. Verify:
+     - The queue resumes the active video smoothly (sends `resumeDownload`).
+     - It does NOT advance to or skip the current video.
+     - Download finishes at 100% and advances to the next item in sequence.
+
+---
+
+#### 17. History Preservation After Tab Closures
+* **Status**: `[NOT RUN - Manual Browser Test Required]`
+* **Procedure**:
+  1. Download a video via Single Download or Bulk Download until completed.
+  2. Close the background video tab (or user's video tab).
+  3. Verify:
+     - The completed video remains visible in the Side Panel history list.
+     - It is NOT removed when `chrome.tabs.onRemoved` fires.
+     - Click **Clear History**; verify completed historical items are cleared while any active downloading items remain preserved.

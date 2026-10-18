@@ -49,6 +49,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const statusMessage = document.getElementById('statusMessage');
     const statusActionButton = document.getElementById('statusActionButton');
     const downloadAlert = document.getElementById('downloadAlert');
+    const blobHandoffBanner = document.getElementById('blobHandoffBanner');
 
     // Local Caches
     let extensionEnabledCached = false;
@@ -57,6 +58,8 @@ document.addEventListener("DOMContentLoaded", () => {
     let downloadProgressCache = {};
     let activeTabInfoCache = null;
     let bulkQueueCache = null;
+    let historyCache = [];
+    let blobHandoffUnsupportedCache = false;
 
     const renderedItems = new Map();
     let statusTimeoutId = null;
@@ -121,6 +124,17 @@ document.addEventListener("DOMContentLoaded", () => {
         } else {
             const sub = dest.subfolder || 'Drive Videos';
             destinationInfo.innerHTML = 'Save to: <strong>Downloads / ' + escapeHtml(sub) + '</strong>';
+        }
+    }
+
+    function updateBlobHandoffUI(unsupported) {
+        blobHandoffUnsupportedCache = Boolean(unsupported);
+        if (blobHandoffBanner) {
+            if (blobHandoffUnsupportedCache) {
+                blobHandoffBanner.classList.remove('hidden');
+            } else {
+                blobHandoffBanner.classList.add('hidden');
+            }
         }
     }
 
@@ -200,6 +214,9 @@ document.addEventListener("DOMContentLoaded", () => {
         const item = document.createElement('div');
         item.className = 'video-item';
         item.dataset.requestId = req.requestId;
+        if (req.isHistoryOnly) {
+            item.dataset.isHistoryOnly = 'true';
+        }
 
         const row = document.createElement('div');
         row.className = 'video-row';
@@ -236,6 +253,10 @@ document.addEventListener("DOMContentLoaded", () => {
         dlBtn.setAttribute('aria-label', 'Download ' + (req.videoTitle || 'video'));
         dlBtn.addEventListener('click', () => {
             if (dlBtn.disabled) return;
+            if (item.dataset.isHistoryOnly === 'true') {
+                setStatus('Item recorded in download history.', false, 2000);
+                return;
+            }
             chrome.runtime.sendMessage({
                 type: 'startDownload',
                 requestId: req.requestId
@@ -390,9 +411,13 @@ document.addEventListener("DOMContentLoaded", () => {
         } else if (st === 'completed') {
             progressWrap.classList.remove('hidden');
             progressFill.className = 'progress-fill completed';
-            ps.textContent = 'Saved to downloads (' + (prog.total ? formatBytes(prog.total) : doneStr) + ')';
-            dlBtn.classList.remove('hidden');
-            dlBtn.textContent = '⬇ Re-download';
+            ps.textContent = prog.note || ('Saved to downloads (' + (prog.total ? formatBytes(prog.total) : doneStr) + ')');
+            if (item.dataset.isHistoryOnly === 'true') {
+                dlBtn.classList.add('hidden');
+            } else {
+                dlBtn.classList.remove('hidden');
+                dlBtn.textContent = '⬇ Re-download';
+            }
             pauseBtn.classList.add('hidden');
             resumeBtn.classList.add('hidden');
             cancelBtn.classList.add('hidden');
@@ -401,18 +426,26 @@ document.addEventListener("DOMContentLoaded", () => {
             progressWrap.classList.remove('hidden');
             progressFill.className = 'progress-fill error';
             ps.textContent = 'Cancelled' + (prog.completed ? ' at ' + doneStr : '');
-            dlBtn.classList.remove('hidden');
-            dlBtn.textContent = 'Retry';
+            if (item.dataset.isHistoryOnly === 'true') {
+                dlBtn.classList.add('hidden');
+            } else {
+                dlBtn.classList.remove('hidden');
+                dlBtn.textContent = 'Retry';
+            }
             pauseBtn.classList.add('hidden');
             resumeBtn.classList.add('hidden');
             cancelBtn.classList.add('hidden');
             item.classList.remove('is-active');
-        } else if (st === 'interrupted' || st === 'error') {
+        } else if (st === 'interrupted' || st === 'error' || st === 'failed') {
             progressWrap.classList.remove('hidden');
             progressFill.className = 'progress-fill error';
             ps.textContent = 'Failed: ' + (prog.error || 'Download failed');
-            dlBtn.classList.remove('hidden');
-            dlBtn.textContent = 'Retry';
+            if (item.dataset.isHistoryOnly === 'true') {
+                dlBtn.classList.add('hidden');
+            } else {
+                dlBtn.classList.remove('hidden');
+                dlBtn.textContent = 'Retry';
+            }
             pauseBtn.classList.add('hidden');
             resumeBtn.classList.add('hidden');
             cancelBtn.classList.add('hidden');
@@ -420,12 +453,40 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     }
 
-    function syncList(requests, progress) {
+    function syncList(requests, progress, history = historyCache) {
         const matching = [];
+        const seenKeys = new Set();
+
+        // 1. Live captured requests
         for (const requestId in requests) {
             const req = requests[requestId];
             if (!req.lastItagUrl || !req.videoTitle) continue;
-            matching.push(Object.assign({ requestId: requestId }, req));
+            const key = req.fileId || req.videoTitle;
+            seenKeys.add(key);
+            matching.push(Object.assign({ requestId: requestId, key: key }, req));
+        }
+
+        // 2. Historical records not currently represented in live captures
+        if (Array.isArray(history)) {
+            for (const h of history) {
+                const key = h.fileId || h.key || h.name;
+                if (!seenKeys.has(key)) {
+                    seenKeys.add(key);
+                    matching.push({
+                        requestId: 'hist_' + (h.key || h.fileId || h.name),
+                        key: key,
+                        fileId: h.fileId,
+                        videoTitle: h.name,
+                        quality: 'HD',
+                        capturedAt: h.finishedAt || 0,
+                        isHistoryOnly: true,
+                        historyStatus: h.status,
+                        historyError: h.error,
+                        historyNote: h.note,
+                        historyBytes: h.bytes
+                    });
+                }
+            }
         }
 
         matching.sort((a, b) => {
@@ -478,7 +539,16 @@ document.addEventListener("DOMContentLoaded", () => {
                 }
             }
 
-            if (progress && progress[req.requestId]) {
+            if (req.isHistoryOnly) {
+                applyProgress(item, {
+                    status: req.historyStatus,
+                    completed: req.historyBytes,
+                    total: req.historyBytes,
+                    percent: req.historyStatus === 'completed' ? 100 : 0,
+                    error: req.historyError,
+                    note: req.historyNote
+                });
+            } else if (progress && progress[req.requestId]) {
                 applyProgress(item, progress[req.requestId]);
             }
         });
@@ -631,16 +701,8 @@ document.addEventListener("DOMContentLoaded", () => {
     // Clear History
     clearHistoryBtn.addEventListener('click', () => {
         chrome.runtime.sendMessage({ type: 'clearHistory' }, () => {
-            renderedItems.forEach((el, rid) => {
-                const st = (downloadProgressCache[rid] || {}).status;
-                if (st !== 'starting' && st !== 'downloading' && st !== 'saving' && st !== 'paused') {
-                    el.remove();
-                    renderedItems.delete(rid);
-                }
-            });
-            if (renderedItems.size === 0) {
-                showEmptyState();
-            }
+            historyCache = historyCache.filter(h => h.status !== 'completed' && h.status !== 'failed' && h.status !== 'cancelled');
+            syncList(capturedRequestsCache, downloadProgressCache, historyCache);
             setStatus('History cleared.', false, 2000);
         });
     });
@@ -783,9 +845,11 @@ document.addEventListener("DOMContentLoaded", () => {
         updateDestinationUI(resp.destination);
         updateActiveTabUI(resp.activeTabInfo);
         updateBulkQueueUI(resp.bulkQueue);
+        updateBlobHandoffUI(resp.blobHandoffUnsupported);
         capturedRequestsCache = resp.requests || {};
         downloadProgressCache = resp.progress || {};
-        syncList(capturedRequestsCache, downloadProgressCache);
+        historyCache = resp.history || [];
+        syncList(capturedRequestsCache, downloadProgressCache, historyCache);
     });
 
     // React to storage changes from service worker
@@ -801,13 +865,20 @@ document.addEventListener("DOMContentLoaded", () => {
         if (changes.bulkQueue) {
             updateBulkQueueUI(changes.bulkQueue.newValue);
         }
+        if (changes.blobHandoffUnsupported !== undefined) {
+            updateBlobHandoffUI(changes.blobHandoffUnsupported.newValue);
+        }
+        if (changes.downloadHistory) {
+            historyCache = changes.downloadHistory.newValue || [];
+            syncList(capturedRequestsCache, downloadProgressCache, historyCache);
+        }
         if (changes.capturedRequests) {
             capturedRequestsCache = changes.capturedRequests.newValue || {};
-            syncList(capturedRequestsCache, downloadProgressCache);
+            syncList(capturedRequestsCache, downloadProgressCache, historyCache);
         }
         if (changes.downloadProgress) {
             downloadProgressCache = changes.downloadProgress.newValue || {};
-            syncList(capturedRequestsCache, downloadProgressCache);
+            syncList(capturedRequestsCache, downloadProgressCache, historyCache);
         }
     });
 
