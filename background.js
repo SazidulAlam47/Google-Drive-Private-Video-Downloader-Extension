@@ -7,8 +7,12 @@ import { chunkedDownloadFn } from './src/download-engine.js';
 import { ERROR_CODES, getErrorMessage } from './src/errors.js';
 import { buildDownloadPath, sanitizeSubfolder } from './src/settings.js';
 import { handleSingleDownload } from './src/single.js';
+import { executeFolderScan } from './src/bulk-scan.js';
 
 const MAX_CONCURRENT_DOWNLOADS = 3;
+
+// Cached folder scan result ready for bulk start
+export let lastScanResult = null;
 
 // Map downloadId -> { requestId, tabId, blobUrl, filename }
 export const activeDownloads = new Map();
@@ -385,8 +389,68 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     if (message.type === 'bulkScan') {
-        sendResponse({ success: false, error: ERROR_CODES.NOT_A_DRIVE_FOLDER });
-        return;
+        chrome.tabs.query({ active: true, lastFocusedWindow: true }, async (tabs) => {
+            const tab = tabs && tabs[0];
+            if (!tab || !tab.id || !tab.url) {
+                sendResponse({ success: false, error: ERROR_CODES.NOT_A_DRIVE_FOLDER });
+                return;
+            }
+
+            const isFolderUrl = tab.url.includes('/drive/folders/') || (tab.url.includes('/drive/u/') && tab.url.includes('/folders/')) || tab.url.includes('/drive/my-drive');
+            if (!isFolderUrl) {
+                sendResponse({ success: false, error: ERROR_CODES.NOT_A_DRIVE_FOLDER });
+                return;
+            }
+
+            if (!state.destination || state.destination.configured === false) {
+                sendResponse({ success: false, needsDestination: true });
+                return;
+            }
+
+            if (state.destination.mode === 'askEachTime') {
+                sendResponse({
+                    success: false,
+                    needsDestination: true,
+                    error: 'BULK_REQUIRES_SUBFOLDER',
+                    message: 'Bulk download requires a subfolder destination (Save-As dialog cannot be used for bulk).'
+                });
+                return;
+            }
+
+            try {
+                const report = await executeFolderScan(tab.id);
+                if (report.videos.length === 0) {
+                    sendResponse({
+                        success: false,
+                        error: ERROR_CODES.NO_VIDEOS_IN_FOLDER,
+                        totalScanned: report.totalScanned,
+                        subfoldersSkipped: report.subfoldersSkipped
+                    });
+                    return;
+                }
+
+                lastScanResult = {
+                    folderTabId: tab.id,
+                    windowId: tab.windowId,
+                    folderTitle: tab.title || 'Drive Folder',
+                    report: report
+                };
+
+                sendResponse({
+                    success: true,
+                    videos: report.videos,
+                    totalScanned: report.totalScanned,
+                    subfoldersSkipped: report.subfoldersSkipped
+                });
+            } catch (err) {
+                sendResponse({
+                    success: false,
+                    error: 'FOLDER_SCAN_FAILED',
+                    message: err.message
+                });
+            }
+        });
+        return true;
     }
 
     if (message.type === 'bulkStart' || message.type === 'bulkPause' || message.type === 'bulkResume' || message.type === 'bulkStop') {
