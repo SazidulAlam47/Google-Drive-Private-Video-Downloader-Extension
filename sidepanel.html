@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -7,6 +8,7 @@
     <title>Drive Video Downloader</title>
     <link rel="stylesheet" href="sidepanel.css">
 </head>
+
 <body>
     <!-- Header -->
     <header class="header" id="header">
@@ -16,7 +18,8 @@
                 Drive Video Downloader
             </div>
             <div class="controls">
-                <button class="icon-btn" id="clearHistoryBtn" title="Clear completed/failed history (does not stop active downloads)">
+                <button class="icon-btn" id="clearHistoryBtn"
+                    title="Clear completed/failed history (does not stop active downloads)">
                     Clear History
                 </button>
             </div>
@@ -41,10 +44,12 @@
 
     <!-- Actions Section -->
     <div class="actions-section">
-        <button class="action-btn primary" id="singleDownloadBtn" disabled title="Download video from the current Google Drive video tab">
+        <button class="action-btn primary" id="singleDownloadBtn" disabled
+            title="Download video from the current Google Drive video tab">
             ⚡ Single Download
         </button>
-        <button class="action-btn secondary" id="bulkDownloadBtn" disabled title="Bulk download all videos from the current Google Drive folder">
+        <button class="action-btn secondary" id="bulkDownloadBtn" disabled
+            title="Bulk download all videos from the current Google Drive folder">
             📁 Bulk Download Folder
         </button>
     </div>
@@ -94,7 +99,8 @@
     </div>
 
     <!-- Blob Handoff Unsupported Notice -->
-    <div class="alert-banner hidden" id="blobHandoffBanner" style="background: rgba(234, 179, 8, 0.15); border-color: rgba(234, 179, 8, 0.4); color: #fde047;">
+    <div class="alert-banner hidden" id="blobHandoffBanner"
+        style="background: rgba(234, 179, 8, 0.15); border-color: rgba(234, 179, 8, 0.4); color: #fde047;">
         Chrome would not accept the in-page file for custom folders; files are saved to your default Downloads folder.
     </div>
 
@@ -107,7 +113,7 @@
     <!-- Footer -->
     <footer class="footer">
         Author: <a href="https://github.com/md-abdullah-al-maruf" target="_blank">Md. Abdullah Al Maruf</a>
-        &nbsp;•&nbsp; Modified by Sazidul Alam
+        &nbsp;•&nbsp; Modified by <a href="https://github.com/sazidulAlam47" target="_blank">Sazidul Alam</a>
         &nbsp;•&nbsp; Version 3.0
     </footer>
 
@@ -115,13 +121,15 @@
     <div class="modal-overlay hidden" id="destinationModal">
         <div class="modal-card">
             <h3>Download Destination</h3>
-            <p>Choose where to save videos inside your browser's Downloads folder. Note: Chrome does not allow extensions to write outside Chrome's Downloads folder without a native dialog.</p>
+            <p>Choose where to save videos inside your browser's Downloads folder. Note: Chrome does not allow
+                extensions to write outside Chrome's Downloads folder without a native dialog.</p>
             <div class="modal-radio-group">
                 <label>
                     <input type="radio" name="destMode" value="subfolder" checked>
                     Subfolder in Downloads:
                 </label>
-                <input type="text" id="destSubfolderInput" value="Drive Videos" placeholder="Subfolder name, e.g. Drive Videos">
+                <input type="text" id="destSubfolderInput" value="Drive Videos"
+                    placeholder="Subfolder name, e.g. Drive Videos">
                 <label>
                     <input type="radio" name="destMode" value="askEachTime">
                     Ask each time (Save-As dialog, Single Download only)
@@ -129,7 +137,8 @@
             </div>
             <div class="modal-actions">
                 <button class="bulk-ctrl-btn" id="destCancelBtn">Cancel</button>
-                <button class="bulk-ctrl-btn" style="background:#2563eb; border-color:#1d4ed8; color:#fff;" id="destConfirmBtn">Confirm</button>
+                <button class="bulk-ctrl-btn" style="background:#2563eb; border-color:#1d4ed8; color:#fff;"
+                    id="destConfirmBtn">Confirm</button>
             </div>
         </div>
     </div>
@@ -138,7 +147,8 @@
     <div class="modal-overlay hidden" id="stopConfirmModal">
         <div class="modal-card">
             <h3>Stop Bulk Download?</h3>
-            <p>Are you sure you want to stop the bulk download? Videos that have already completed downloading will be kept.</p>
+            <p>Are you sure you want to stop the bulk download? Videos that have already completed downloading will be
+                kept.</p>
             <div class="modal-actions">
                 <button class="bulk-ctrl-btn" id="stopCancelBtn">Keep Running</button>
                 <button class="bulk-ctrl-btn stop" id="stopConfirmBtn">Yes, Stop</button>
@@ -153,11 +163,13 @@
             <p id="scanReportText">Found 0 videos.</p>
             <div class="modal-actions">
                 <button class="bulk-ctrl-btn" id="scanCancelBtn">Cancel</button>
-                <button class="bulk-ctrl-btn" style="background:#2563eb; border-color:#1d4ed8; color:#fff;" id="scanStartBtn">Start Download</button>
+                <button class="bulk-ctrl-btn" style="background:#2563eb; border-color:#1d4ed8; color:#fff;"
+                    id="scanStartBtn">Start Download</button>
             </div>
         </div>
     </div>
 
     <script type="module" src="sidepanel.js"></script>
 </body>
+
 </html>
