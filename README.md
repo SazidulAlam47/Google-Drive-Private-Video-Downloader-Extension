@@ -23,6 +23,7 @@ Version 3.0 is a comprehensive architectural upgrade introducing:
 * **Zero-Reload Single Download**: Download without reloading your tab or losing your playback position.
 * **Bulk Folder Scanning & Sequential Queue**:
   * Automatically scans virtualized Drive folder item lists.
+  * Interactive video selection list with checkboxes, Select All / Deselect All controls, and live count before downloading.
   * Processes videos strictly one by one in isolated background tabs.
   * Pause, resume, or safely stop queues at any time without closing the source folder tab.
 * **Intelligent Watchdogs & Retries**:

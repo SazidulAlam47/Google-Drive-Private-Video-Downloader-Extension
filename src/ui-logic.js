@@ -112,3 +112,78 @@ export function getBulkControlsState(queue) {
         summaryText
     };
 }
+
+/**
+ * Computes selection UI state and derived values.
+ * @param {Array} videos - Array of video entries from folder scan.
+ * @param {Set|Array} selectedIdsSet - Set or Array of currently selected fileIds.
+ * @returns {Object} { total, selected, allSelected, noneSelected, selectAllEnabled, deselectAllEnabled, startEnabled, startLabel, summaryText }
+ */
+export function computeSelectionState(videos, selectedIdsSet) {
+    const list = Array.isArray(videos) ? videos : [];
+    const total = list.length;
+    const set = selectedIdsSet instanceof Set
+        ? selectedIdsSet
+        : new Set(Array.isArray(selectedIdsSet) ? selectedIdsSet : []);
+
+    let selected = 0;
+    for (const v of list) {
+        if (v && v.fileId && set.has(v.fileId)) {
+            selected++;
+        }
+    }
+
+    const allSelected = total > 0 && selected === total;
+    const noneSelected = selected === 0;
+    const selectAllEnabled = total > 0 && selected < total;
+    const deselectAllEnabled = selected > 0;
+    const startEnabled = selected > 0;
+    const startLabel = `Start Download (${selected})`;
+    const summaryText = `Found ${total} ${total === 1 ? 'video' : 'videos'} · ${selected} selected`;
+
+    return {
+        total,
+        selected,
+        allSelected,
+        noneSelected,
+        selectAllEnabled,
+        deselectAllEnabled,
+        startEnabled,
+        startLabel,
+        summaryText
+    };
+}
+
+/**
+ * Filters and orders scan videos based on user selection, de-duplicating and dropping unknown IDs.
+ * Preserves the original scan order.
+ * @param {Array} scanVideos - Array of video objects from folder scan ({ fileId, name, ... }).
+ * @param {Array|Set} selectedIds - Iterable/Array/Set of selected fileIds.
+ * @returns {Array} Ordered, de-duplicated array of chosen scan entries.
+ */
+export function filterSelectedVideos(scanVideos, selectedIds) {
+    if (!Array.isArray(scanVideos) || !selectedIds) {
+        return [];
+    }
+
+    const selectedSet = selectedIds instanceof Set
+        ? selectedIds
+        : new Set(Array.isArray(selectedIds) ? selectedIds : []);
+
+    if (selectedSet.size === 0) {
+        return [];
+    }
+
+    const seen = new Set();
+    const result = [];
+
+    for (const item of scanVideos) {
+        if (!item || !item.fileId) continue;
+        if (selectedSet.has(item.fileId) && !seen.has(item.fileId)) {
+            seen.add(item.fileId);
+            result.push(item);
+        }
+    }
+
+    return result;
+}

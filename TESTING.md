@@ -241,3 +241,43 @@ This document contains the step-by-step verification checklist for manual testin
      - Pending and active videos are recorded as `cancelled` in queue and history.
      - Owned background tabs are closed.
      - Further stop calls are guarded and ignored.
+
+---
+
+#### 20. Video Selection Modal & Checkbox Filtering
+* **Status**: `[NOT RUN - Manual Browser Test Required]`
+* **Procedure**:
+  1. Open a Google Drive folder containing 10+ videos (including videos with non-Latin/Bengali names).
+  2. Click **Bulk Download Folder**.
+  3. Verify:
+     - The selection modal appears showing the names of all found videos.
+     - All checkboxes are checked by default.
+     - Summary counter displays `Found N videos · N selected`.
+     - Bengali and non-Latin video names render correctly (`dir="auto"`).
+     - Each row displays an index number (`1.`, `2.`, ...).
+  4. Uncheck 3 videos:
+     - Verify the summary counter updates live to `Found N videos · (N - 3) selected`.
+     - Verify the Start button updates to `Start Download (N - 3)`.
+  5. Click **Deselect All**:
+     - Verify all checkboxes are unchecked in one pass.
+     - Verify Start button is disabled (`Start Download (0)`) and hint `"Select at least one video"` is shown.
+     - Verify **Deselect All** button is disabled, **Select All** button is enabled.
+  6. Click **Select All**:
+     - Verify all checkboxes are re-checked in one pass.
+     - Verify Start button is re-enabled (`Start Download (N)`).
+     - Verify **Select All** button is disabled, **Deselect All** button is enabled.
+  7. Click **Cancel**:
+     - Verify the selection modal closes without initiating any downloads.
+  8. Click **Bulk Download Folder** again, uncheck 3 videos, and click **Start Download (N - 3)**:
+     - Verify the selection modal closes.
+     - Verify the bulk queue initializes with exactly the N - 3 selected videos in their original scan order.
+     - Verify the 3 unchecked videos are never opened in background tabs, captured, or downloaded.
+  9. Test on a large folder with 200+ videos:
+     - Verify the selection list scrolls smoothly and remains responsive (`content-visibility: auto`).
+  10. Stale scan verification:
+     - Perform a scan, wait > 10 minutes (or close the Drive folder tab), then trigger bulk download.
+     - Verify the error `"Folder scan is stale or tab was closed. Please re-scan folder."` appears in the persistent error area.
+  11. Panel closure test:
+     - Scan a folder, change selection, close the side panel before clicking Start.
+     - Verify nothing starts and no stray tabs are created.
+

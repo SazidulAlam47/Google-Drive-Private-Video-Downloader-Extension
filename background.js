@@ -5,12 +5,13 @@ import { state, schedulePersist, persistStateNow, loadPersistedState, countActiv
 import { attachCaptureForTab, detachCaptureForTab, detachAllPassiveCaptures, reconcileDebuggerTargets, handleDebuggerDetach, handleDebuggerEvent, extractDriveFileId } from './src/capture.js';
 import { chunkedDownloadFn } from './src/download-engine.js';
 import { ERROR_CODES, getErrorMessage } from './src/errors.js';
-import { buildDownloadPath, sanitizeSubfolder } from './src/settings.js';
+import { buildDownloadPath, sanitizeSubfolder, validateDestination } from './src/settings.js';
 import { handleSingleDownload } from './src/single.js';
 import { executeFolderScan } from './src/bulk-scan.js';
 import { BulkQueueController } from './src/bulk-queue.js';
 import { registerCaptureWaiter } from './src/capture.js';
 import { DownloadEventsManager } from './src/download-events.js';
+import { filterSelectedVideos } from './src/ui-logic.js';
 
 const MAX_CONCURRENT_DOWNLOADS = 3;
 
@@ -458,8 +459,53 @@ if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage)
                 return;
             }
 
+            // Verify destination is configured and valid for bulk
+            const destValidation = validateDestination(state.destination, true);
+            if (!destValidation.valid) {
+                sendResponse({
+                    success: false,
+                    error: destValidation.error,
+                    message: getErrorMessage(destValidation.error)
+                });
+                return;
+            }
+
+            // Guard against starting while queue is active
+            if (state.bulkQueue && (state.bulkQueue.state === 'running' || state.bulkQueue.state === 'pausing' || state.bulkQueue.state === 'paused' || state.bulkQueue.state === 'stopping')) {
+                sendResponse({
+                    success: false,
+                    error: ERROR_CODES.QUEUE_BUSY,
+                    message: getErrorMessage(ERROR_CODES.QUEUE_BUSY)
+                });
+                return;
+            }
+
             if (!scan.report || !scan.report.videos || !scan.report.videos.length) {
-                sendResponse({ success: false, error: ERROR_CODES.NO_VIDEOS_IN_FOLDER });
+                sendResponse({
+                    success: false,
+                    error: ERROR_CODES.NO_VIDEOS_IN_FOLDER,
+                    message: getErrorMessage(ERROR_CODES.NO_VIDEOS_IN_FOLDER)
+                });
+                return;
+            }
+
+            // Worker-side validation: require selectedFileIds array
+            if (!message.selectedFileIds || !Array.isArray(message.selectedFileIds)) {
+                sendResponse({
+                    success: false,
+                    error: ERROR_CODES.NO_VIDEOS_SELECTED,
+                    message: getErrorMessage(ERROR_CODES.NO_VIDEOS_SELECTED)
+                });
+                return;
+            }
+
+            const chosenVideos = filterSelectedVideos(scan.report.videos, message.selectedFileIds);
+            if (!chosenVideos || chosenVideos.length === 0) {
+                sendResponse({
+                    success: false,
+                    error: ERROR_CODES.NO_VIDEOS_SELECTED,
+                    message: getErrorMessage(ERROR_CODES.NO_VIDEOS_SELECTED)
+                });
                 return;
             }
 
@@ -467,7 +513,7 @@ if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage)
                 scan.folderTabId,
                 scan.windowId,
                 state.destination,
-                scan.report.videos
+                chosenVideos
             );
 
             bulkController.start().catch(() => {});

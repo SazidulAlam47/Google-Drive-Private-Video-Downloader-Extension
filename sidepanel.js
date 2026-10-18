@@ -1,6 +1,6 @@
 // Side Panel Controller
 import { ERROR_CODES, getErrorMessage } from './src/errors.js';
-import { getBulkControlsState } from './src/ui-logic.js';
+import { getBulkControlsState, computeSelectionState, filterSelectedVideos } from './src/ui-logic.js';
 
 document.addEventListener("DOMContentLoaded", () => {
     const MAX_CONCURRENT = 3;
@@ -42,7 +42,12 @@ document.addEventListener("DOMContentLoaded", () => {
 
     const scanReportModal = document.getElementById('scanReportModal');
     const scanReportTitle = document.getElementById('scanReportTitle');
-    const scanReportText = document.getElementById('scanReportText');
+    const selectionSummary = document.getElementById('selectionSummary');
+    const selectionSubsummary = document.getElementById('selectionSubsummary');
+    const selectAllBtn = document.getElementById('selectAllBtn');
+    const deselectAllBtn = document.getElementById('deselectAllBtn');
+    const selectionList = document.getElementById('selectionList');
+    const selectionHint = document.getElementById('selectionHint');
     const scanCancelBtn = document.getElementById('scanCancelBtn');
     const scanStartBtn = document.getElementById('scanStartBtn');
 
@@ -62,6 +67,12 @@ document.addEventListener("DOMContentLoaded", () => {
     let bulkQueueCache = null;
     let historyCache = [];
     let blobHandoffUnsupportedCache = false;
+
+    // Transient selection state for Bulk Download modal
+    let scannedVideosCache = [];
+    let selectedFileIdsSet = new Set();
+    let previousActiveElement = null;
+    let lastToggledIndex = -1;
 
     const renderedItems = new Map();
     let statusTimeoutId = null;
@@ -790,6 +801,187 @@ document.addEventListener("DOMContentLoaded", () => {
         });
     });
 
+    function updateSelectionUI() {
+        const selState = computeSelectionState(scannedVideosCache, selectedFileIdsSet);
+        selectionSummary.textContent = selState.summaryText;
+
+        selectAllBtn.disabled = !selState.selectAllEnabled;
+        deselectAllBtn.disabled = !selState.deselectAllEnabled;
+
+        scanStartBtn.disabled = !selState.startEnabled;
+        scanStartBtn.textContent = selState.startLabel;
+
+        if (!selState.startEnabled) {
+            selectionHint.classList.remove('hidden');
+        } else {
+            selectionHint.classList.add('hidden');
+        }
+    }
+
+    function openSelectionModal(videos, totalScanned, subfoldersSkipped) {
+        scannedVideosCache = Array.isArray(videos) ? videos : [];
+        selectedFileIdsSet = new Set(scannedVideosCache.map(v => v.fileId));
+        lastToggledIndex = -1;
+        previousActiveElement = document.activeElement;
+
+        scanReportTitle.textContent = 'Select videos to download';
+        selectionSubsummary.textContent = `${totalScanned || 0} items scanned · ${subfoldersSkipped || 0} subfolders skipped`;
+
+        const completedFileIds = new Set(
+            (historyCache || [])
+                .filter(h => h && h.status === 'completed' && h.fileId)
+                .map(h => h.fileId)
+        );
+
+        const fragment = document.createDocumentFragment();
+        scannedVideosCache.forEach((video, idx) => {
+            const label = document.createElement('label');
+            label.className = 'selection-row';
+            label.htmlFor = `vid-chk-${idx}`;
+
+            const chk = document.createElement('input');
+            chk.type = 'checkbox';
+            chk.className = 'selection-checkbox';
+            chk.id = `vid-chk-${idx}`;
+            chk.dataset.fileId = video.fileId;
+            chk.dataset.index = String(idx);
+            chk.value = video.fileId;
+            chk.checked = true;
+            chk.setAttribute('aria-label', video.name || `Video ${idx + 1}`);
+
+            const idxSpan = document.createElement('span');
+            idxSpan.className = 'selection-index';
+            idxSpan.textContent = `${idx + 1}.`;
+
+            const nameSpan = document.createElement('span');
+            nameSpan.className = 'selection-name';
+            nameSpan.dir = 'auto';
+            nameSpan.title = video.name || 'Untitled Video';
+            nameSpan.textContent = video.name || 'Untitled Video';
+
+            label.appendChild(chk);
+            label.appendChild(idxSpan);
+            label.appendChild(nameSpan);
+
+            if (completedFileIds.has(video.fileId)) {
+                const badge = document.createElement('span');
+                badge.className = 'selection-badge';
+                badge.textContent = 'Downloaded';
+                badge.title = 'Already completed in download history';
+                label.appendChild(badge);
+            }
+
+            fragment.appendChild(label);
+        });
+
+        selectionList.replaceChildren(fragment);
+        updateSelectionUI();
+
+        scanReportModal.classList.remove('hidden');
+        selectAllBtn.focus();
+    }
+
+    function closeSelectionModal() {
+        scanReportModal.classList.add('hidden');
+        if (previousActiveElement && typeof previousActiveElement.focus === 'function') {
+            try {
+                previousActiveElement.focus();
+            } catch (e) {}
+        }
+    }
+
+    // Delegated change listener on selection list (one listener for all rows)
+    selectionList.addEventListener('change', (e) => {
+        const target = e.target;
+        if (!target || !target.classList.contains('selection-checkbox')) return;
+        const fileId = target.dataset.fileId;
+        if (target.checked) {
+            selectedFileIdsSet.add(fileId);
+        } else {
+            selectedFileIdsSet.delete(fileId);
+        }
+        updateSelectionUI();
+    });
+
+    // Delegated click listener for Shift+click range selection
+    selectionList.addEventListener('click', (e) => {
+        const row = e.target.closest('.selection-row');
+        if (!row) return;
+        const chk = row.querySelector('.selection-checkbox');
+        if (!chk) return;
+
+        // Skip synthetic double-event on label element itself
+        if (e.target.tagName === 'LABEL') return;
+
+        const currIdx = parseInt(chk.dataset.index, 10);
+        if (Number.isNaN(currIdx)) return;
+
+        if (e.shiftKey && lastToggledIndex !== -1 && lastToggledIndex !== currIdx) {
+            const start = Math.min(lastToggledIndex, currIdx);
+            const end = Math.max(lastToggledIndex, currIdx);
+            const targetState = chk.checked;
+            const allCheckboxes = selectionList.querySelectorAll('.selection-checkbox');
+            for (let i = start; i <= end; i++) {
+                const c = allCheckboxes[i];
+                if (c) {
+                    c.checked = targetState;
+                    if (targetState) {
+                        selectedFileIdsSet.add(c.dataset.fileId);
+                    } else {
+                        selectedFileIdsSet.delete(c.dataset.fileId);
+                    }
+                }
+            }
+            updateSelectionUI();
+        }
+        lastToggledIndex = currIdx;
+    });
+
+    // Select All / Deselect All
+    selectAllBtn.addEventListener('click', () => {
+        const checkboxes = selectionList.querySelectorAll('.selection-checkbox');
+        selectedFileIdsSet.clear();
+        for (let i = 0; i < checkboxes.length; i++) {
+            checkboxes[i].checked = true;
+            selectedFileIdsSet.add(checkboxes[i].dataset.fileId);
+        }
+        updateSelectionUI();
+    });
+
+    deselectAllBtn.addEventListener('click', () => {
+        const checkboxes = selectionList.querySelectorAll('.selection-checkbox');
+        selectedFileIdsSet.clear();
+        for (let i = 0; i < checkboxes.length; i++) {
+            checkboxes[i].checked = false;
+        }
+        updateSelectionUI();
+    });
+
+    // Keyboard navigation and modal focus trap
+    scanReportModal.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+            e.preventDefault();
+            closeSelectionModal();
+            clearStatus();
+            return;
+        }
+        if (e.key === 'Tab') {
+            const focusable = Array.from(scanReportModal.querySelectorAll(
+                'button:not(:disabled), input[type="checkbox"]:not(:disabled)'
+            ));
+            if (!focusable.length) return;
+            const first = focusable[0];
+            const last = focusable[focusable.length - 1];
+            if (e.shiftKey && document.activeElement === first) {
+                e.preventDefault();
+                last.focus();
+            } else if (!e.shiftKey && document.activeElement === last) {
+                e.preventDefault();
+                first.focus();
+            }
+        }
+    });
+
     // Bulk Download Button
     bulkDownloadBtn.addEventListener('click', () => {
         setStatus('Scanning folder for videos...', false);
@@ -810,22 +1002,34 @@ document.addEventListener("DOMContentLoaded", () => {
                 return;
             }
 
-            // Show scan report modal
-            const videos = response.videos || [];
-            scanReportTitle.textContent = 'Folder Scan Complete';
-            scanReportText.textContent = `Scanned ${response.totalScanned || 0} items. Found ${videos.length} videos (${response.subfoldersSkipped || 0} subfolders skipped). Ready to start sequential bulk download?`;
-            scanReportModal.classList.remove('hidden');
+            clearStatus();
+            openSelectionModal(
+                response.videos || [],
+                response.totalScanned || 0,
+                response.subfoldersSkipped || 0
+            );
         });
     });
 
     scanCancelBtn.addEventListener('click', () => {
-        scanReportModal.classList.add('hidden');
+        closeSelectionModal();
         clearStatus();
     });
 
     scanStartBtn.addEventListener('click', () => {
-        scanReportModal.classList.add('hidden');
-        chrome.runtime.sendMessage({ type: 'bulkStart' }, (resp) => {
+        const selectedIds = Array.from(selectedFileIdsSet);
+        if (!selectedIds.length) return;
+
+        closeSelectionModal();
+
+        chrome.runtime.sendMessage({
+            type: 'bulkStart',
+            selectedFileIds: selectedIds
+        }, (resp) => {
+            if (chrome.runtime.lastError) {
+                setStatus('Failed to communicate with service worker.', true);
+                return;
+            }
             if (resp && !resp.success) {
                 setStatus(getErrorMessage(resp.error, resp.message), true);
             }

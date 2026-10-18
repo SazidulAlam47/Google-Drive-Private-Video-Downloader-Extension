@@ -21,13 +21,21 @@ export const ERROR_CODES = {
     QUEUE_STOPPED: 'QUEUE_STOPPED',
     NETWORK_ERROR_RETRYABLE: 'NETWORK_ERROR_RETRYABLE',
     DOWNLOAD_FAILED_NON_RETRYABLE: 'DOWNLOAD_FAILED_NON_RETRYABLE',
-    SCAN_STALE_OR_TAB_CLOSED: 'SCAN_STALE_OR_TAB_CLOSED'
+    SCAN_STALE_OR_TAB_CLOSED: 'SCAN_STALE_OR_TAB_CLOSED',
+    NO_VIDEOS_SELECTED: 'NO_VIDEOS_SELECTED',
+    DESTINATION_NOT_CONFIGURED: 'DESTINATION_NOT_CONFIGURED',
+    BULK_REQUIRES_SUBFOLDER: 'BULK_REQUIRES_SUBFOLDER',
+    QUEUE_BUSY: 'QUEUE_BUSY'
 };
 
 export const ERROR_MESSAGES = {
     [ERROR_CODES.NO_DRIVE_VIDEO_PAGE]: 'No Google Drive video page detected. Open a video preview page (e.g. drive.google.com/file/d/...) and try again.',
     [ERROR_CODES.NOT_A_DRIVE_FOLDER]: 'No Google Drive folder detected. Open a folder page (e.g. drive.google.com/drive/folders/...) and try again.',
     [ERROR_CODES.NO_VIDEOS_IN_FOLDER]: 'No video files found in the selected folder.',
+    [ERROR_CODES.NO_VIDEOS_SELECTED]: 'Select at least one video to download.',
+    [ERROR_CODES.DESTINATION_NOT_CONFIGURED]: 'Save destination is not configured. Please set your destination folder.',
+    [ERROR_CODES.BULK_REQUIRES_SUBFOLDER]: 'Bulk download requires a subfolder save destination (interactive prompt is not supported for bulk).',
+    [ERROR_CODES.QUEUE_BUSY]: 'A bulk download is currently in progress. Please wait or stop the current queue before starting a new one.',
     [ERROR_CODES.NO_MEDIA_REQUEST_CAPTURED]: 'No media stream request captured for this video. Play the video or click Reload below.',
     [ERROR_CODES.DESTINATION_CANCELLED]: 'Destination folder selection was cancelled. Download aborted.',
     [ERROR_CODES.DOWNLOAD_INTERRUPTED]: 'Download was interrupted. Click Retry to restart.',
