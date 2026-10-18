@@ -8,6 +8,8 @@ import { ERROR_CODES, getErrorMessage } from './src/errors.js';
 import { buildDownloadPath, sanitizeSubfolder } from './src/settings.js';
 import { handleSingleDownload } from './src/single.js';
 import { executeFolderScan } from './src/bulk-scan.js';
+import { BulkQueueController } from './src/bulk-queue.js';
+import { registerCaptureWaiter } from './src/capture.js';
 
 const MAX_CONCURRENT_DOWNLOADS = 3;
 
@@ -23,6 +25,28 @@ export function registerDownloadTerminalListener(listener) {
     downloadTerminalListeners.add(listener);
     return () => downloadTerminalListeners.delete(listener);
 }
+
+// Bulk queue controller instance
+export const bulkController = new BulkQueueController({
+    tabs: typeof chrome !== 'undefined' ? chrome.tabs : null,
+    debuggerApi: typeof chrome !== 'undefined' ? chrome.debugger : null,
+    downloads: typeof chrome !== 'undefined' ? chrome.downloads : null,
+    scripting: typeof chrome !== 'undefined' ? chrome.scripting : null,
+    stateRef: state,
+    persistState: persistStateNow,
+    attachCapture: attachCaptureForTab,
+    waitCapture: registerCaptureWaiter
+});
+
+// Register terminal listener for bulk queue
+registerDownloadTerminalListener((requestId, resultState, errorReason) => {
+    if (bulkController.queue && bulkController.queue.state !== 'finished') {
+        const activeItem = bulkController.queue.items[bulkController.queue.index];
+        if (activeItem && activeItem.requestId === requestId) {
+            bulkController.handleItemTerminal(activeItem, resultState, errorReason);
+        }
+    }
+});
 
 // Configure side panel behavior on startup
 if (typeof chrome !== 'undefined' && chrome.sidePanel && chrome.sidePanel.setPanelBehavior) {
@@ -264,6 +288,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (message.error !== undefined)            state.downloadProgress[rid].error     = message.error;
         state.downloadProgress[rid].lastUpdated = Date.now();
         schedulePersist();
+
+        if (typeof message.percent === 'number') {
+            bulkController.onProgressUpdate(rid, message.percent, message.completed, message.status);
+        }
         return;
     }
 
@@ -453,9 +481,43 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return true;
     }
 
-    if (message.type === 'bulkStart' || message.type === 'bulkPause' || message.type === 'bulkResume' || message.type === 'bulkStop') {
-        sendResponse({ success: false, error: 'Bulk download not initialized.' });
+    if (message.type === 'bulkStart') {
+        if (!lastScanResult || !lastScanResult.report || !lastScanResult.report.videos.length) {
+            sendResponse({ success: false, error: ERROR_CODES.NO_VIDEOS_IN_FOLDER });
+            return;
+        }
+
+        bulkController.initQueue(
+            lastScanResult.folderTabId,
+            lastScanResult.windowId,
+            state.destination,
+            lastScanResult.report.videos
+        );
+
+        bulkController.start().catch(() => {});
+        sendResponse({ success: true });
         return;
+    }
+
+    if (message.type === 'bulkPause') {
+        bulkController.pause().then(() => {
+            sendResponse({ success: true });
+        });
+        return true;
+    }
+
+    if (message.type === 'bulkResume') {
+        bulkController.resume().then(() => {
+            sendResponse({ success: true });
+        });
+        return true;
+    }
+
+    if (message.type === 'bulkStop') {
+        bulkController.stop().then(() => {
+            sendResponse({ success: true });
+        });
+        return true;
     }
 
     if (message.type === 'reloadTabAndCapture') {
@@ -474,7 +536,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // Chrome debugger event & detach listeners
 chrome.debugger.onEvent.addListener(handleDebuggerEvent);
-chrome.debugger.onDetach.addListener(handleDebuggerDetach);
+chrome.debugger.onDetach.addListener((debuggeeId, reason) => {
+    handleDebuggerDetach(debuggeeId, reason);
+    if (debuggeeId && debuggeeId.tabId) {
+        bulkController.onDebuggerDetach(debuggeeId.tabId, reason);
+    }
+});
 
 // Chrome downloads tracking for true completion states
 if (typeof chrome !== 'undefined' && chrome.downloads && chrome.downloads.onChanged) {
@@ -556,6 +623,8 @@ chrome.tabs.onActivated.addListener(() => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+    bulkController.onTabRemoved(tabId);
+
     if (state.attachedTabs.has(tabId)) {
         state.attachedTabs.delete(tabId);
     }
