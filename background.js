@@ -5,8 +5,19 @@ import { state, schedulePersist, persistStateNow, loadPersistedState, countActiv
 import { attachCaptureForTab, detachCaptureForTab, detachAllPassiveCaptures, reconcileDebuggerTargets, handleDebuggerDetach, handleDebuggerEvent, extractDriveFileId } from './src/capture.js';
 import { chunkedDownloadFn } from './src/download-engine.js';
 import { ERROR_CODES, getErrorMessage } from './src/errors.js';
+import { buildDownloadPath, sanitizeSubfolder } from './src/settings.js';
 
 const MAX_CONCURRENT_DOWNLOADS = 3;
+
+// Map downloadId -> { requestId, tabId, blobUrl, filename }
+export const activeDownloads = new Map();
+
+// Listeners for download terminal states (used by bulk queue controller)
+const downloadTerminalListeners = new Set();
+export function registerDownloadTerminalListener(listener) {
+    downloadTerminalListeners.add(listener);
+    return () => downloadTerminalListeners.delete(listener);
+}
 
 // Configure side panel behavior on startup
 if (typeof chrome !== 'undefined' && chrome.sidePanel && chrome.sidePanel.setPanelBehavior) {
@@ -251,9 +262,112 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return;
     }
 
+    if (message.type === 'downloadBlobReady') {
+        const { requestId, blobUrl, filename, size } = message;
+        const req = state.capturedRequests[requestId];
+        const tabId = req ? req.tabId : (sender && sender.tab ? sender.tab.id : null);
+
+        const pathInfo = buildDownloadPath(state.destination, filename);
+        const targetFilename = pathInfo.filename;
+        const saveAs = pathInfo.saveAs;
+
+        if (!state.downloadProgress[requestId]) {
+            state.downloadProgress[requestId] = {
+                status: 'saving',
+                completed: size,
+                total: size,
+                percent: 100,
+                error: null,
+                title: filename,
+                lastUpdated: Date.now()
+            };
+        } else {
+            state.downloadProgress[requestId].status = 'saving';
+            state.downloadProgress[requestId].percent = 100;
+            state.downloadProgress[requestId].lastUpdated = Date.now();
+        }
+        persistStateNow();
+
+        try {
+            chrome.downloads.download({
+                url: blobUrl,
+                filename: targetFilename,
+                saveAs: saveAs,
+                conflictAction: 'uniquify'
+            }, (downloadId) => {
+                const err = chrome.runtime.lastError;
+                if (err || !downloadId) {
+                    const errMsg = (err && err.message) ? err.message : 'DOWNLOAD_INIT_FAILED';
+                    const isCancelled = errMsg.toLowerCase().includes('cancel') || errMsg.includes('USER_CANCELED');
+
+                    if (isCancelled) {
+                        state.downloadProgress[requestId].status = 'cancelled';
+                        state.downloadProgress[requestId].error = getErrorMessage(ERROR_CODES.DESTINATION_CANCELLED);
+                        state.downloadProgress[requestId].lastUpdated = Date.now();
+                        persistStateNow();
+
+                        if (tabId) {
+                            chrome.tabs.sendMessage(tabId, {
+                                type: 'saveResult',
+                                requestId: requestId,
+                                success: false,
+                                error: 'DESTINATION_CANCELLED'
+                            }, () => void chrome.runtime.lastError);
+                        }
+                    } else {
+                        // Fallback to in-tab anchor save (default Downloads folder)
+                        if (tabId) {
+                            chrome.tabs.sendMessage(tabId, {
+                                type: 'saveResult',
+                                requestId: requestId,
+                                fallbackToAnchor: true
+                            }, () => void chrome.runtime.lastError);
+                        }
+
+                        state.downloadProgress[requestId].status = 'completed';
+                        state.downloadProgress[requestId].note = 'Saved to default Downloads folder (custom folder not applied)';
+                        state.downloadProgress[requestId].lastUpdated = Date.now();
+                        state.downloadProgress[requestId].error = null;
+                        persistStateNow();
+                    }
+                    return;
+                }
+
+                activeDownloads.set(downloadId, {
+                    requestId,
+                    tabId,
+                    blobUrl,
+                    filename: targetFilename
+                });
+
+                state.downloadProgress[requestId].downloadId = downloadId;
+                persistStateNow();
+            });
+        } catch (e) {
+            // Synchronous error from chrome.downloads.download
+            if (tabId) {
+                chrome.tabs.sendMessage(tabId, {
+                    type: 'saveResult',
+                    requestId: requestId,
+                    fallbackToAnchor: true
+                }, () => void chrome.runtime.lastError);
+            }
+            state.downloadProgress[requestId].status = 'completed';
+            state.downloadProgress[requestId].note = 'Saved to default Downloads folder (custom folder not applied)';
+            state.downloadProgress[requestId].lastUpdated = Date.now();
+            persistStateNow();
+        }
+        return;
+    }
+
     if (message.type === 'setDestination') {
         if (message.destination) {
-            state.destination = Object.assign({}, state.destination, message.destination);
+            const sub = sanitizeSubfolder(message.destination.subfolder);
+            state.destination = {
+                mode: message.destination.mode === 'askEachTime' ? 'askEachTime' : 'subfolder',
+                subfolder: sub,
+                configured: true
+            };
             persistStateNow();
         }
         sendResponse({ success: true, destination: state.destination });
@@ -292,6 +406,66 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 // Chrome debugger event & detach listeners
 chrome.debugger.onEvent.addListener(handleDebuggerEvent);
 chrome.debugger.onDetach.addListener(handleDebuggerDetach);
+
+// Chrome downloads tracking for true completion states
+if (typeof chrome !== 'undefined' && chrome.downloads && chrome.downloads.onChanged) {
+    chrome.downloads.onChanged.addListener((delta) => {
+        if (!delta || !delta.id) return;
+        const active = activeDownloads.get(delta.id);
+        if (!active) return;
+
+        const { requestId, tabId } = active;
+
+        if (delta.state) {
+            if (delta.state.current === 'complete') {
+                if (state.downloadProgress[requestId]) {
+                    state.downloadProgress[requestId].status = 'completed';
+                    state.downloadProgress[requestId].percent = 100;
+                    state.downloadProgress[requestId].error = null;
+                    state.downloadProgress[requestId].lastUpdated = Date.now();
+                }
+                persistStateNow();
+
+                if (tabId) {
+                    chrome.tabs.sendMessage(tabId, {
+                        type: 'saveResult',
+                        requestId: requestId,
+                        success: true
+                    }, () => void chrome.runtime.lastError);
+                }
+
+                activeDownloads.delete(delta.id);
+
+                downloadTerminalListeners.forEach(listener => {
+                    try { listener(requestId, 'completed', null); } catch (e) {}
+                });
+            } else if (delta.state.current === 'interrupted') {
+                const errorMsg = delta.error ? (delta.error.current || delta.error) : 'DOWNLOAD_INTERRUPTED';
+                if (state.downloadProgress[requestId]) {
+                    state.downloadProgress[requestId].status = 'interrupted';
+                    state.downloadProgress[requestId].error = String(errorMsg);
+                    state.downloadProgress[requestId].lastUpdated = Date.now();
+                }
+                persistStateNow();
+
+                if (tabId) {
+                    chrome.tabs.sendMessage(tabId, {
+                        type: 'saveResult',
+                        requestId: requestId,
+                        success: false,
+                        error: String(errorMsg)
+                    }, () => void chrome.runtime.lastError);
+                }
+
+                activeDownloads.delete(delta.id);
+
+                downloadTerminalListeners.forEach(listener => {
+                    try { listener(requestId, 'interrupted', String(errorMsg)); } catch (e) {}
+                });
+            }
+        }
+    });
+}
 
 // Tab lifecycle listeners
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {

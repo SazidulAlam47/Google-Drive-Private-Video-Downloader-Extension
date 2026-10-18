@@ -12,17 +12,19 @@ export function chunkedDownloadFn(url, videoTitle, requestId) {
     let isPaused    = false;
     let isCancelled = false;
     let messageListener = null;
+    let currentBlobUrl = null;
+    let safetyRevokeTimer = null;
 
     const abortController = (typeof AbortController !== 'undefined')
         ? new AbortController() : null;
 
     const sanitizeTitle = (raw) => {
         let t = (raw || 'video')
-            .replace(/[\\/:*?"<>|]/g, '_')
+            .replace(/[\x00-\x1f\x7f<>:"/\\|?*]/g, '_')
             .replace(/\s+/g, ' ')
             .replace(/^[\s.]+|[\s.]+$/g, '')
             .replace(/\.mp4$/i, '');
-        if (t.length > 200) t = t.substring(0, 200);
+        if (t.length > 180) t = t.substring(0, 180);
         return t + '.mp4';
     };
 
@@ -62,6 +64,37 @@ export function chunkedDownloadFn(url, videoTitle, requestId) {
             if (abortController) {
                 try { abortController.abort(); } catch (e) {}
             }
+            if (currentBlobUrl) {
+                try { URL.revokeObjectURL(currentBlobUrl); } catch (e) {}
+                currentBlobUrl = null;
+            }
+            cleanup();
+        } else if (msg.type === 'saveResult') {
+            if (safetyRevokeTimer) {
+                clearTimeout(safetyRevokeTimer);
+                safetyRevokeTimer = null;
+            }
+            if (msg.fallbackToAnchor && currentBlobUrl) {
+                // Fallback to direct anchor download when chrome.downloads cannot access blob URL
+                try {
+                    const a = document.createElement('a');
+                    a.href = currentBlobUrl;
+                    a.download = safeTitle;
+                    document.body.appendChild(a);
+                    a.click();
+                    a.remove();
+                } catch (e) {}
+                setTimeout(() => {
+                    if (currentBlobUrl) {
+                        try { URL.revokeObjectURL(currentBlobUrl); } catch (e) {}
+                        currentBlobUrl = null;
+                    }
+                }, 60000);
+            } else if (currentBlobUrl) {
+                try { URL.revokeObjectURL(currentBlobUrl); } catch (e) {}
+                currentBlobUrl = null;
+            }
+            cleanup();
         }
     };
     try {
@@ -86,15 +119,30 @@ export function chunkedDownloadFn(url, videoTitle, requestId) {
         } catch (e) {}
     };
 
-    const triggerDownload = (blob) => {
-        const downloadURL = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = downloadURL;
-        a.download = safeTitle;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        setTimeout(() => { try { URL.revokeObjectURL(downloadURL); } catch (e) {} }, 60000);
+    const handleBlobReady = (blob) => {
+        try {
+            currentBlobUrl = URL.createObjectURL(blob);
+            // 30-minute safety timeout to prevent permanent memory leaks if worker disconnects
+            safetyRevokeTimer = setTimeout(() => {
+                if (currentBlobUrl) {
+                    try { URL.revokeObjectURL(currentBlobUrl); } catch (e) {}
+                    currentBlobUrl = null;
+                }
+            }, 30 * 60 * 1000);
+
+            report('saving', blob.size, blob.size, 100, null);
+
+            chrome.runtime.sendMessage({
+                type: 'downloadBlobReady',
+                requestId: requestId,
+                blobUrl: currentBlobUrl,
+                filename: safeTitle,
+                size: blob.size
+            }, () => { void chrome.runtime.lastError; });
+        } catch (e) {
+            report('error', blob.size, blob.size, 100, e && e.message ? e.message : String(e));
+            cleanup();
+        }
     };
 
     const isUrlExpired = (response) => {
@@ -271,12 +319,11 @@ export function chunkedDownloadFn(url, videoTitle, requestId) {
             if (!reader) {
                 try {
                     const blob = await response.blob();
-                    triggerDownload(blob);
-                    report('completed', blob.size, blob.size, 100, null);
+                    handleBlobReady(blob);
                 } catch (e) {
                     report('error', 0, 0, 0, e && e.message ? e.message : String(e));
+                    cleanup();
                 }
-                cleanup();
                 return;
             }
 
@@ -314,9 +361,7 @@ export function chunkedDownloadFn(url, videoTitle, requestId) {
                 }
 
                 const blob = new Blob(chunks, { type: 'video/mp4' });
-                triggerDownload(blob);
-                report('completed', blob.size, blob.size, 100, null);
-                cleanup();
+                handleBlobReady(blob);
                 return;
             } catch (e) {
                 if (isCancelled) {
@@ -537,8 +582,7 @@ export function chunkedDownloadFn(url, videoTitle, requestId) {
                 throw new Error('Final size mismatch: ' + blob.size + '/' + totalSize);
             }
 
-            triggerDownload(blob);
-            report('completed', blob.size, blob.size, 100, null);
+            handleBlobReady(blob);
         } catch (err) {
             if (isCancelled) {
                 report('cancelled', bytesDownloaded, totalSize,
@@ -548,8 +592,11 @@ export function chunkedDownloadFn(url, videoTitle, requestId) {
                        Math.round((bytesDownloaded / totalSize) * 100),
                        err && err.message ? err.message : String(err));
             }
-        } finally {
             cleanup();
+        } finally {
+            if (!currentBlobUrl) {
+                cleanup();
+            }
         }
     }
 }
