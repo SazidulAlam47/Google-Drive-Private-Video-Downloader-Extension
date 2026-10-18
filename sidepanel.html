@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/png" href="icon.png">
+    <title>Drive Video Downloader</title>
+    <link rel="stylesheet" href="sidepanel.css">
+</head>
+<body>
+    <!-- Header -->
+    <header class="header" id="header">
+        <div class="title-row">
+            <div class="title">
+                <span class="dot" id="statusDot"></span>
+                Drive Video Downloader
+            </div>
+            <div class="controls">
+                <button class="icon-btn" id="clearHistoryBtn" title="Clear completed/failed history (does not stop active downloads)">
+                    Clear History
+                </button>
+            </div>
+        </div>
+        <div class="toggle-row">
+            <button class="state-btn btn-on" id="btnOn">ON</button>
+            <button class="state-btn btn-off" id="btnOff" disabled>OFF</button>
+        </div>
+        <div class="tab-chip not-drive" id="activeTabChip">
+            <span class="badge" id="tabChipBadge">PAGE</span>
+            <span class="tab-text" id="tabChipText">Checking active tab...</span>
+        </div>
+    </header>
+
+    <!-- Save Location Bar -->
+    <div class="destination-bar" id="destinationBar">
+        <div class="destination-info" id="destinationInfo">
+            Save to: <strong>Downloads / Drive Videos</strong>
+        </div>
+        <button class="btn-change-dest" id="changeDestinationBtn">Change</button>
+    </div>
+
+    <!-- Actions Section -->
+    <div class="actions-section">
+        <button class="action-btn primary" id="singleDownloadBtn" disabled title="Download video from the current Google Drive video tab">
+            ⚡ Single Download
+        </button>
+        <button class="action-btn secondary" id="bulkDownloadBtn" disabled title="Bulk download all videos from the current Google Drive folder">
+            📁 Bulk Download Folder
+        </button>
+    </div>
+
+    <!-- Bulk Queue Panel -->
+    <div class="bulk-panel hidden" id="bulkPanel">
+        <div class="bulk-header">
+            <div class="bulk-title">
+                <span>📁 Bulk Queue</span>
+                <span class="bulk-status-badge running" id="bulkStatusBadge">Running</span>
+            </div>
+            <div class="bulk-controls">
+                <button class="bulk-ctrl-btn" id="bulkPauseResumeBtn">⏸ Pause</button>
+                <button class="bulk-ctrl-btn stop" id="bulkStopBtn">⏹ Stop</button>
+            </div>
+        </div>
+        <div id="bulkRestartedBanner" class="bulk-banner hidden">
+            The extension restarted. Resume to continue.
+        </div>
+        <div class="bulk-progress-text" id="bulkProgressSummary" style="font-size: 11px; color: #ccc;">
+            0 / 0 · 0 failed
+        </div>
+        <div class="progress-wrap" id="bulkCurrentProgressWrap">
+            <div class="progress-bar">
+                <div class="progress-fill" id="bulkCurrentProgressFill" style="width: 0%;"></div>
+            </div>
+            <div class="progress-text">
+                <span class="pp" id="bulkCurrentPercent">0%</span>
+                <span class="ps" id="bulkCurrentItemTitle">Waiting...</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Body / Video list -->
+    <main class="body">
+        <div id="downloadContainer">
+            <div class="section-label" id="historyLabel">Captured Videos & History</div>
+        </div>
+    </main>
+
+    <!-- Status / Error Area -->
+    <div id="statusContainer" class="hidden">
+        <div class="status-row">
+            <div class="status-message" id="statusMessage"></div>
+            <button class="btn-status-action hidden" id="statusActionButton">Action</button>
+        </div>
+    </div>
+
+    <!-- Alert Banner -->
+    <div class="alert-banner hidden" id="downloadAlert">
+        <span class="blink"></span>
+        Download in progress — keep the source Drive tab open.
+    </div>
+
+    <!-- Footer -->
+    <footer class="footer">
+        Author: <a href="https://github.com/md-abdullah-al-maruf" target="_blank">Md. Abdullah Al Maruf</a>
+        &nbsp;•&nbsp; Modified by Sazidul Alam
+        &nbsp;•&nbsp; Version 2.0
+    </footer>
+
+    <!-- Destination Modal -->
+    <div class="modal-overlay hidden" id="destinationModal">
+        <div class="modal-card">
+            <h3>Download Destination</h3>
+            <p>Choose where to save videos inside your browser's Downloads folder. Note: Chrome does not allow extensions to write outside Chrome's Downloads folder without a native dialog.</p>
+            <div class="modal-radio-group">
+                <label>
+                    <input type="radio" name="destMode" value="subfolder" checked>
+                    Subfolder in Downloads:
+                </label>
+                <input type="text" id="destSubfolderInput" value="Drive Videos" placeholder="Subfolder name, e.g. Drive Videos">
+                <label>
+                    <input type="radio" name="destMode" value="askEachTime">
+                    Ask each time (Save-As dialog, Single Download only)
+                </label>
+            </div>
+            <div class="modal-actions">
+                <button class="bulk-ctrl-btn" id="destCancelBtn">Cancel</button>
+                <button class="bulk-ctrl-btn" style="background:#2563eb; border-color:#1d4ed8; color:#fff;" id="destConfirmBtn">Confirm</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bulk Stop Confirmation Modal -->
+    <div class="modal-overlay hidden" id="stopConfirmModal">
+        <div class="modal-card">
+            <h3>Stop Bulk Download?</h3>
+            <p>Are you sure you want to stop the bulk download? Videos that have already completed downloading will be kept.</p>
+            <div class="modal-actions">
+                <button class="bulk-ctrl-btn" id="stopCancelBtn">Keep Running</button>
+                <button class="bulk-ctrl-btn stop" id="stopConfirmBtn">Yes, Stop</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bulk Scan Report Modal -->
+    <div class="modal-overlay hidden" id="scanReportModal">
+        <div class="modal-card">
+            <h3 id="scanReportTitle">Folder Scan Complete</h3>
+            <p id="scanReportText">Found 0 videos.</p>
+            <div class="modal-actions">
+                <button class="bulk-ctrl-btn" id="scanCancelBtn">Cancel</button>
+                <button class="bulk-ctrl-btn" style="background:#2563eb; border-color:#1d4ed8; color:#fff;" id="scanStartBtn">Start Download</button>
+            </div>
+        </div>
+    </div>
+
+    <script type="module" src="sidepanel.js"></script>
+</body>
+</html>
