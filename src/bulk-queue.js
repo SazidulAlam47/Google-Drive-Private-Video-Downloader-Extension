@@ -63,6 +63,7 @@ export class BulkQueueController {
             items: videos.map(v => ({
                 fileId: v.fileId,
                 name: v.name,
+                unverifiedType: Boolean(v.unverifiedType),
                 state: 'queued',
                 attempts: 0,
                 percent: 0,
@@ -561,8 +562,13 @@ export class BulkQueueController {
         }
 
         // Failure handling & retries
+        if (item.unverifiedType && (errorReason === ERROR_CODES.CAPTURE_TIMEOUT || errorReason === 'CAPTURE_TIMEOUT')) {
+            errorReason = ERROR_CODES.NOT_A_VIDEO_OR_NO_STREAM;
+            rawErrorMessage = getErrorMessage(ERROR_CODES.NOT_A_VIDEO_OR_NO_STREAM);
+        }
+
         const isTransient = (
-            errorReason === ERROR_CODES.CAPTURE_TIMEOUT ||
+            (!item.unverifiedType && (errorReason === ERROR_CODES.CAPTURE_TIMEOUT || errorReason === 'CAPTURE_TIMEOUT')) ||
             errorReason === ERROR_CODES.URL_EXPIRED ||
             errorReason === ERROR_CODES.NETWORK_ERROR_RETRYABLE ||
             errorReason === 'NETWORK_ERROR_RETRYABLE' ||

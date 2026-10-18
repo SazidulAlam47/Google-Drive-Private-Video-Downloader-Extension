@@ -281,3 +281,91 @@ This document contains the step-by-step verification checklist for manual testin
      - Scan a folder, change selection, close the side panel before clicking Start.
      - Verify nothing starts and no stray tabs are created.
 
+---
+
+#### 21. Folder Scan Classification & Extension-less File Discovery
+* **Status**: `[NOT RUN - Manual Browser Test Required]`
+* **Procedure**:
+  1. Open a Google Drive folder containing 70 items with a mix of:
+     - Standard video extensions (`.mp4`, `.mkv`, `.webm`, `.mov`, etc.).
+     - Extension-less video names (e.g. `Class 01`, `Lecture 10`).
+     - Videos with duplicate/trailing descriptors (e.g. `Video.mp4 (1)`).
+     - Subfolders and non-video files (PDFs, docs).
+  2. In the Side Panel, click **📁 Bulk Download Folder**.
+  3. Verify:
+     - Scanning completes and displays the selection modal.
+     - Files with recognizable video extensions and signals are placed into **Section 1: "Videos (N)"** and checked by default.
+     - Files without obvious video extensions or signals are placed into **Section 2: "Other files (M)"** and unchecked by default.
+     - No non-folder files are silently dropped.
+     - Subfolders are counted as skipped and not opened.
+
+---
+
+#### 22. Virtualized Pre-Scrolled Folder Recovery
+* **Status**: `[NOT RUN - Manual Browser Test Required]`
+* **Procedure**:
+  1. Navigate to a large Drive folder with > 50 files.
+  2. Manually scroll down to the middle or bottom of the Drive folder so earlier rows are unmounted from the DOM.
+  3. In the Side Panel, click **📁 Bulk Download Folder**.
+  4. Verify:
+     - Scanner automatically scrolls to the top (`scrollTop = 0`) before beginning row collection.
+     - Waits for DOM items to settle.
+     - Collects all items starting from item 1.
+     - When finished scanning, restores the folder scroll position to where the user left it.
+
+---
+
+#### 23. "Other Files" Section Interaction & Badges
+* **Status**: `[NOT RUN - Manual Browser Test Required]`
+* **Procedure**:
+  1. Scan a folder containing unrecognized files or non-video documents.
+  2. Verify:
+     - Section 2 is collapsed by default and shows `"Other files (M) — files whose type could not be confirmed as video"`.
+     - Click the toggle arrow / section header; verify Section 2 expands smoothly.
+     - Each item row displays an index, file name with `dir="auto"`, and a reason badge (e.g. `no recognized video extension or signals`, `document`, `spreadsheet`).
+     - Checkboxes in Section 2 are unchecked by default.
+  3. Click **Include all**:
+     - Verify all "Other files" are checked.
+     - Verify the summary counter in the header updates to reflect the total selected count.
+     - Verify **Include all** is disabled and **Exclude all** is enabled.
+  4. Click **Exclude all**:
+     - Verify all "Other files" are unchecked.
+     - Verify summary counter updates accordingly.
+
+---
+
+#### 24. Unverified File Processing in Queue (Fast Failure on Non-Video)
+* **Status**: `[NOT RUN - Manual Browser Test Required]`
+* **Procedure**:
+  1. In the selection modal, check one unverified file from "Other files" (e.g., a PDF or text file) alongside normal videos.
+  2. Click **Start Download**.
+  3. Verify:
+     - The unverified file is queued with `unverifiedType: true`.
+     - When the item opens in a background tab, media capture fails to find video streams within the capture timeout.
+     - The item immediately transitions to `failed` with error message `"No video stream was found — this file may not be a video."` (`NOT_A_VIDEO_OR_NO_STREAM`).
+     - The queue does **NOT** retry the item (attempt stays 1 of 1).
+     - The queue automatically advances to the next video without stalling.
+
+---
+
+#### 25. Scan Diagnostics Clipboard Copy
+* **Status**: `[NOT RUN - Manual Browser Test Required]`
+* **Procedure**:
+  1. Complete a folder scan.
+  2. In the selection modal header/footer, click **📋 Copy scan diagnostics**.
+  3. Verify:
+     - Button text changes to `"✓ Diagnostics copied"`.
+     - Paste clipboard content into a text editor.
+     - Verify valid JSON containing `{ stats, items: [...] }` with `containerFound`, `stoppedBy`, `steps`, `elapsedMs`, and per-item `ariaLabelRaw`, `signals`, and `matchedSignal`.
+
+---
+
+#### 26. Incomplete Scan Warning Banner
+* **Status**: `[NOT RUN - Manual Browser Test Required]`
+* **Procedure**:
+  1. Simulate or test scanning an extraordinarily large folder where the scanner reaches max steps or max time.
+  2. If `stoppedBy` is `'maxSteps'` or `'maxTime'`, verify:
+     - An alert banner is displayed in the selection modal: `"Scan may be incomplete — scrolling stopped early. Re-scan or scroll the folder manually first."`
+     - The user is still able to select and download the discovered items.
+
+

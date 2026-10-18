@@ -42,11 +42,24 @@ document.addEventListener("DOMContentLoaded", () => {
 
     const scanReportModal = document.getElementById('scanReportModal');
     const scanReportTitle = document.getElementById('scanReportTitle');
+    const copyDiagnosticsBtn = document.getElementById('copyDiagnosticsBtn');
+    const scanIncompleteWarning = document.getElementById('scanIncompleteWarning');
     const selectionSummary = document.getElementById('selectionSummary');
     const selectionSubsummary = document.getElementById('selectionSubsummary');
+
+    const videosSectionTitle = document.getElementById('videosSectionTitle');
     const selectAllBtn = document.getElementById('selectAllBtn');
     const deselectAllBtn = document.getElementById('deselectAllBtn');
     const selectionList = document.getElementById('selectionList');
+
+    const othersSection = document.getElementById('othersSection');
+    const othersToggleBtn = document.getElementById('othersToggleBtn');
+    const othersToggleArrow = document.getElementById('othersToggleArrow');
+    const othersSectionTitle = document.getElementById('othersSectionTitle');
+    const includeAllOthersBtn = document.getElementById('includeAllOthersBtn');
+    const excludeAllOthersBtn = document.getElementById('excludeAllOthersBtn');
+    const othersList = document.getElementById('othersList');
+
     const selectionHint = document.getElementById('selectionHint');
     const scanCancelBtn = document.getElementById('scanCancelBtn');
     const scanStartBtn = document.getElementById('scanStartBtn');
@@ -70,9 +83,13 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // Transient selection state for Bulk Download modal
     let scannedVideosCache = [];
+    let scannedOthersCache = [];
+    let scannedStatsCache = null;
+    let scannedDiagnosticsCache = null;
     let selectedFileIdsSet = new Set();
     let previousActiveElement = null;
     let lastToggledIndex = -1;
+    let othersExpanded = false;
 
     const renderedItems = new Map();
     let statusTimeoutId = null;
@@ -802,11 +819,14 @@ document.addEventListener("DOMContentLoaded", () => {
     });
 
     function updateSelectionUI() {
-        const selState = computeSelectionState(scannedVideosCache, selectedFileIdsSet);
+        const selState = computeSelectionState(scannedVideosCache, scannedOthersCache, selectedFileIdsSet);
         selectionSummary.textContent = selState.summaryText;
 
         selectAllBtn.disabled = !selState.selectAllEnabled;
         deselectAllBtn.disabled = !selState.deselectAllEnabled;
+
+        includeAllOthersBtn.disabled = !selState.includeAllOthersEnabled;
+        excludeAllOthersBtn.disabled = !selState.excludeAllOthersEnabled;
 
         scanStartBtn.disabled = !selState.startEnabled;
         scanStartBtn.textContent = selState.startLabel;
@@ -818,15 +838,7 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     }
 
-    function openSelectionModal(videos, totalScanned, subfoldersSkipped) {
-        scannedVideosCache = Array.isArray(videos) ? videos : [];
-        selectedFileIdsSet = new Set(scannedVideosCache.map(v => v.fileId));
-        lastToggledIndex = -1;
-        previousActiveElement = document.activeElement;
-
-        scanReportTitle.textContent = 'Select videos to download';
-        selectionSubsummary.textContent = `${totalScanned || 0} items scanned · ${subfoldersSkipped || 0} subfolders skipped`;
-
+    function buildSectionRows(container, items, defaultChecked, isOther) {
         const completedFileIds = new Set(
             (historyCache || [])
                 .filter(h => h && h.status === 'completed' && h.fileId)
@@ -834,20 +846,21 @@ document.addEventListener("DOMContentLoaded", () => {
         );
 
         const fragment = document.createDocumentFragment();
-        scannedVideosCache.forEach((video, idx) => {
+        items.forEach((item, idx) => {
             const label = document.createElement('label');
-            label.className = 'selection-row';
-            label.htmlFor = `vid-chk-${idx}`;
+            label.className = 'selection-row' + (isOther ? ' other-row' : '');
+            label.htmlFor = `chk-${isOther ? 'other' : 'vid'}-${idx}`;
 
             const chk = document.createElement('input');
             chk.type = 'checkbox';
             chk.className = 'selection-checkbox';
-            chk.id = `vid-chk-${idx}`;
-            chk.dataset.fileId = video.fileId;
+            chk.id = `chk-${isOther ? 'other' : 'vid'}-${idx}`;
+            chk.dataset.fileId = item.fileId;
+            chk.dataset.section = isOther ? 'others' : 'videos';
             chk.dataset.index = String(idx);
-            chk.value = video.fileId;
-            chk.checked = true;
-            chk.setAttribute('aria-label', video.name || `Video ${idx + 1}`);
+            chk.value = item.fileId;
+            chk.checked = defaultChecked;
+            chk.setAttribute('aria-label', item.name || `File ${idx + 1}`);
 
             const idxSpan = document.createElement('span');
             idxSpan.className = 'selection-index';
@@ -856,14 +869,21 @@ document.addEventListener("DOMContentLoaded", () => {
             const nameSpan = document.createElement('span');
             nameSpan.className = 'selection-name';
             nameSpan.dir = 'auto';
-            nameSpan.title = video.name || 'Untitled Video';
-            nameSpan.textContent = video.name || 'Untitled Video';
+            nameSpan.title = item.name || (isOther ? 'Untitled File' : 'Untitled Video');
+            nameSpan.textContent = item.name || (isOther ? 'Untitled File' : 'Untitled Video');
 
             label.appendChild(chk);
             label.appendChild(idxSpan);
             label.appendChild(nameSpan);
 
-            if (completedFileIds.has(video.fileId)) {
+            if (isOther && item.reason) {
+                const reasonBadge = document.createElement('span');
+                reasonBadge.className = 'others-reason-badge';
+                reasonBadge.textContent = item.reason;
+                label.appendChild(reasonBadge);
+            }
+
+            if (completedFileIds.has(item.fileId)) {
                 const badge = document.createElement('span');
                 badge.className = 'selection-badge';
                 badge.textContent = 'Downloaded';
@@ -874,7 +894,49 @@ document.addEventListener("DOMContentLoaded", () => {
             fragment.appendChild(label);
         });
 
-        selectionList.replaceChildren(fragment);
+        container.replaceChildren(fragment);
+    }
+
+    function openSelectionModal(videos, others, totalScanned, subfoldersSkipped, stats, diagnostics) {
+        scannedVideosCache = Array.isArray(videos) ? videos : [];
+        scannedOthersCache = Array.isArray(others) ? others : [];
+        scannedStatsCache = stats || null;
+        scannedDiagnosticsCache = diagnostics || { stats, items: [] };
+
+        // Videos checked by default, Others unchecked by default
+        selectedFileIdsSet = new Set(scannedVideosCache.map(v => v.fileId));
+        lastToggledIndex = -1;
+        othersExpanded = false;
+        previousActiveElement = document.activeElement;
+
+        scanReportTitle.textContent = 'Select videos to download';
+
+        const total = totalScanned || (scannedVideosCache.length + scannedOthersCache.length + (subfoldersSkipped || 0));
+        selectionSubsummary.textContent = `${total} items scanned · ${scannedVideosCache.length} videos · ${scannedOthersCache.length} other files · ${subfoldersSkipped || 0} subfolders skipped`;
+
+        // Check if scan may be incomplete
+        if (stats && (stats.stoppedBy === 'maxSteps' || stats.stoppedBy === 'maxTime')) {
+            scanIncompleteWarning.classList.remove('hidden');
+        } else {
+            scanIncompleteWarning.classList.add('hidden');
+        }
+
+        videosSectionTitle.textContent = `Videos (${scannedVideosCache.length})`;
+        othersSectionTitle.textContent = `Other files — not detected as video (${scannedOthersCache.length})`;
+
+        othersToggleBtn.setAttribute('aria-expanded', 'false');
+        othersToggleArrow.classList.remove('expanded');
+        othersList.classList.add('hidden');
+
+        if (scannedOthersCache.length > 0) {
+            othersSection.classList.remove('hidden');
+        } else {
+            othersSection.classList.add('hidden');
+        }
+
+        buildSectionRows(selectionList, scannedVideosCache, true, false);
+        buildSectionRows(othersList, scannedOthersCache, false, true);
+
         updateSelectionUI();
 
         scanReportModal.classList.remove('hidden');
@@ -890,8 +952,8 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     }
 
-    // Delegated change listener on selection list (one listener for all rows)
-    selectionList.addEventListener('change', (e) => {
+    // Delegated change listener on selection lists
+    function handleListChange(e) {
         const target = e.target;
         if (!target || !target.classList.contains('selection-checkbox')) return;
         const fileId = target.dataset.fileId;
@@ -901,16 +963,17 @@ document.addEventListener("DOMContentLoaded", () => {
             selectedFileIdsSet.delete(fileId);
         }
         updateSelectionUI();
-    });
+    }
+    selectionList.addEventListener('change', handleListChange);
+    othersList.addEventListener('change', handleListChange);
 
-    // Delegated click listener for Shift+click range selection
-    selectionList.addEventListener('click', (e) => {
+    // Delegated click listener for Shift+click range selection within a section
+    function handleListClick(e, listEl) {
         const row = e.target.closest('.selection-row');
         if (!row) return;
         const chk = row.querySelector('.selection-checkbox');
         if (!chk) return;
 
-        // Skip synthetic double-event on label element itself
         if (e.target.tagName === 'LABEL') return;
 
         const currIdx = parseInt(chk.dataset.index, 10);
@@ -920,7 +983,7 @@ document.addEventListener("DOMContentLoaded", () => {
             const start = Math.min(lastToggledIndex, currIdx);
             const end = Math.max(lastToggledIndex, currIdx);
             const targetState = chk.checked;
-            const allCheckboxes = selectionList.querySelectorAll('.selection-checkbox');
+            const allCheckboxes = listEl.querySelectorAll('.selection-checkbox');
             for (let i = start; i <= end; i++) {
                 const c = allCheckboxes[i];
                 if (c) {
@@ -935,12 +998,13 @@ document.addEventListener("DOMContentLoaded", () => {
             updateSelectionUI();
         }
         lastToggledIndex = currIdx;
-    });
+    }
+    selectionList.addEventListener('click', (e) => handleListClick(e, selectionList));
+    othersList.addEventListener('click', (e) => handleListClick(e, othersList));
 
-    // Select All / Deselect All
+    // Section 1 Controls: Select All / Deselect All videos
     selectAllBtn.addEventListener('click', () => {
         const checkboxes = selectionList.querySelectorAll('.selection-checkbox');
-        selectedFileIdsSet.clear();
         for (let i = 0; i < checkboxes.length; i++) {
             checkboxes[i].checked = true;
             selectedFileIdsSet.add(checkboxes[i].dataset.fileId);
@@ -950,12 +1014,79 @@ document.addEventListener("DOMContentLoaded", () => {
 
     deselectAllBtn.addEventListener('click', () => {
         const checkboxes = selectionList.querySelectorAll('.selection-checkbox');
-        selectedFileIdsSet.clear();
         for (let i = 0; i < checkboxes.length; i++) {
             checkboxes[i].checked = false;
+            selectedFileIdsSet.delete(checkboxes[i].dataset.fileId);
         }
         updateSelectionUI();
     });
+
+    // Section 2 Controls: Include all / Exclude all other files
+    includeAllOthersBtn.addEventListener('click', () => {
+        const checkboxes = othersList.querySelectorAll('.selection-checkbox');
+        for (let i = 0; i < checkboxes.length; i++) {
+            checkboxes[i].checked = true;
+            selectedFileIdsSet.add(checkboxes[i].dataset.fileId);
+        }
+        updateSelectionUI();
+    });
+
+    excludeAllOthersBtn.addEventListener('click', () => {
+        const checkboxes = othersList.querySelectorAll('.selection-checkbox');
+        for (let i = 0; i < checkboxes.length; i++) {
+            checkboxes[i].checked = false;
+            selectedFileIdsSet.delete(checkboxes[i].dataset.fileId);
+        }
+        updateSelectionUI();
+    });
+
+    // Section 2 Toggle
+    othersToggleBtn.addEventListener('click', () => {
+        othersExpanded = !othersExpanded;
+        othersToggleBtn.setAttribute('aria-expanded', String(othersExpanded));
+        othersToggleArrow.classList.toggle('expanded', othersExpanded);
+        othersList.classList.toggle('hidden', !othersExpanded);
+    });
+
+    // Copy Scan Diagnostics button
+    copyDiagnosticsBtn.addEventListener('click', () => {
+        const data = scannedDiagnosticsCache || {
+            stats: scannedStatsCache,
+            videos: scannedVideosCache,
+            others: scannedOthersCache
+        };
+        const jsonStr = JSON.stringify(data, null, 2);
+
+        const showNotice = () => {
+            const originalText = copyDiagnosticsBtn.textContent;
+            copyDiagnosticsBtn.textContent = 'Diagnostics copied!';
+            setTimeout(() => {
+                copyDiagnosticsBtn.textContent = originalText;
+            }, 2000);
+        };
+
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(jsonStr).then(showNotice).catch(() => {
+                fallbackCopyText(jsonStr, showNotice);
+            });
+        } else {
+            fallbackCopyText(jsonStr, showNotice);
+        }
+    });
+
+    function fallbackCopyText(text, cb) {
+        try {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            document.body.removeChild(ta);
+            if (cb) cb();
+        } catch (e) {}
+    }
 
     // Keyboard navigation and modal focus trap
     scanReportModal.addEventListener('keydown', (e) => {
@@ -968,7 +1099,8 @@ document.addEventListener("DOMContentLoaded", () => {
         if (e.key === 'Tab') {
             const focusable = Array.from(scanReportModal.querySelectorAll(
                 'button:not(:disabled), input[type="checkbox"]:not(:disabled)'
-            ));
+            )).filter(el => !el.closest('.hidden'));
+
             if (!focusable.length) return;
             const first = focusable[0];
             const last = focusable[focusable.length - 1];
@@ -1005,8 +1137,11 @@ document.addEventListener("DOMContentLoaded", () => {
             clearStatus();
             openSelectionModal(
                 response.videos || [],
+                response.others || [],
                 response.totalScanned || 0,
-                response.subfoldersSkipped || 0
+                response.subfoldersSkipped || 0,
+                response.stats || null,
+                response.diagnostics || null
             );
         });
     });

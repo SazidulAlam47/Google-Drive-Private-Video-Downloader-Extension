@@ -161,18 +161,45 @@
     <div class="modal-overlay hidden" id="scanReportModal" role="dialog" aria-modal="true" aria-labelledby="scanReportTitle">
         <div class="modal-card selection-card">
             <div class="selection-header">
-                <h3 id="scanReportTitle" class="selection-title">Select videos to download</h3>
+                <div class="selection-title-row">
+                    <h3 id="scanReportTitle" class="selection-title">Select videos to download</h3>
+                    <button type="button" class="btn-copy-diag" id="copyDiagnosticsBtn" title="Copy scan diagnostics to clipboard">Copy scan diagnostics</button>
+                </div>
+                <div class="scan-warning hidden" id="scanIncompleteWarning">Scan may be incomplete — scrolling stopped early. Re-scan or scroll the folder manually first.</div>
                 <div class="selection-summary" id="selectionSummary" aria-live="polite">Found 0 videos · 0 selected</div>
                 <div class="selection-subsummary" id="selectionSubsummary">0 items scanned · 0 subfolders skipped</div>
-                <div class="selection-controls-row">
-                    <button type="button" class="selection-ctrl-btn" id="selectAllBtn" aria-label="Select all videos">Select All</button>
-                    <button type="button" class="selection-ctrl-btn" id="deselectAllBtn" aria-label="Deselect all videos">Deselect All</button>
-                </div>
             </div>
 
             <div class="selection-list-wrap">
-                <div class="selection-list" id="selectionList" role="list">
-                    <!-- Video items with checkboxes dynamically rendered here -->
+                <!-- Section 1: Recognized Videos -->
+                <div class="selection-section" id="videosSection">
+                    <div class="section-header-row">
+                        <span class="section-title" id="videosSectionTitle">Videos (0)</span>
+                        <div class="selection-controls-row">
+                            <button type="button" class="selection-ctrl-btn" id="selectAllBtn" aria-label="Select all videos">Select All</button>
+                            <button type="button" class="selection-ctrl-btn" id="deselectAllBtn" aria-label="Deselect all videos">Deselect All</button>
+                        </div>
+                    </div>
+                    <div class="selection-list" id="selectionList" role="list">
+                        <!-- Video items dynamically rendered here -->
+                    </div>
+                </div>
+
+                <!-- Section 2: Other Files (Not detected as video) -->
+                <div class="selection-section others-section hidden" id="othersSection">
+                    <div class="section-header-row">
+                        <button type="button" class="section-toggle-btn" id="othersToggleBtn" aria-expanded="false" aria-controls="othersList">
+                            <span class="toggle-arrow" id="othersToggleArrow">▶</span>
+                            <span class="section-title" id="othersSectionTitle">Other files — not detected as video (0)</span>
+                        </button>
+                        <div class="selection-controls-row" id="othersControlsRow">
+                            <button type="button" class="selection-ctrl-btn" id="includeAllOthersBtn" aria-label="Include all other files">Include all</button>
+                            <button type="button" class="selection-ctrl-btn" id="excludeAllOthersBtn" aria-label="Exclude all other files">Exclude all</button>
+                        </div>
+                    </div>
+                    <div class="selection-list hidden" id="othersList" role="list">
+                        <!-- Other items dynamically rendered here -->
+                    </div>
                 </div>
             </div>
 

@@ -114,40 +114,92 @@ export function getBulkControlsState(queue) {
 }
 
 /**
- * Computes selection UI state and derived values.
- * @param {Array} videos - Array of video entries from folder scan.
- * @param {Set|Array} selectedIdsSet - Set or Array of currently selected fileIds.
- * @returns {Object} { total, selected, allSelected, noneSelected, selectAllEnabled, deselectAllEnabled, startEnabled, startLabel, summaryText }
+ * Computes selection UI state and derived values across videos and other unverified files.
+ * @param {Array} videos - Array of recognized video entries from folder scan.
+ * @param {Array|Set} othersOrSelectedIds - Array of other file entries, or selectedIdsSet if others omitted.
+ * @param {Set|Array} [maybeSelectedIds] - Set or Array of currently selected fileIds when others is provided.
+ * @returns {Object} Selection state and controls enablement.
  */
-export function computeSelectionState(videos, selectedIdsSet) {
-    const list = Array.isArray(videos) ? videos : [];
-    const total = list.length;
+export function computeSelectionState(videos, othersOrSelectedIds, maybeSelectedIds) {
+    let videoList = [];
+    let otherList = [];
+    let selectedIdsSet = null;
+
+    if (maybeSelectedIds !== undefined) {
+        videoList = Array.isArray(videos) ? videos : [];
+        otherList = Array.isArray(othersOrSelectedIds) ? othersOrSelectedIds : [];
+        selectedIdsSet = maybeSelectedIds;
+    } else if (othersOrSelectedIds instanceof Set || Array.isArray(othersOrSelectedIds)) {
+        videoList = Array.isArray(videos) ? videos : [];
+        otherList = [];
+        selectedIdsSet = othersOrSelectedIds;
+    } else {
+        videoList = Array.isArray(videos) ? videos : [];
+        otherList = [];
+        selectedIdsSet = new Set();
+    }
+
+    const totalVideos = videoList.length;
+    const totalOthers = otherList.length;
+    const total = totalVideos + totalOthers;
+
     const set = selectedIdsSet instanceof Set
         ? selectedIdsSet
         : new Set(Array.isArray(selectedIdsSet) ? selectedIdsSet : []);
 
-    let selected = 0;
-    for (const v of list) {
+    let selectedVideos = 0;
+    for (const v of videoList) {
         if (v && v.fileId && set.has(v.fileId)) {
-            selected++;
+            selectedVideos++;
         }
     }
 
-    const allSelected = total > 0 && selected === total;
-    const noneSelected = selected === 0;
-    const selectAllEnabled = total > 0 && selected < total;
-    const deselectAllEnabled = selected > 0;
+    let selectedOthers = 0;
+    for (const o of otherList) {
+        if (o && o.fileId && set.has(o.fileId)) {
+            selectedOthers++;
+        }
+    }
+
+    const selected = selectedVideos + selectedOthers;
+
+    const allVideosSelected = totalVideos > 0 && selectedVideos === totalVideos;
+    const noVideosSelected = selectedVideos === 0;
+    const selectAllEnabled = totalVideos > 0 && selectedVideos < totalVideos;
+    const deselectAllEnabled = selectedVideos > 0;
+
+    const allOthersSelected = totalOthers > 0 && selectedOthers === totalOthers;
+    const noOthersSelected = selectedOthers === 0;
+    const includeAllOthersEnabled = totalOthers > 0 && selectedOthers < totalOthers;
+    const excludeAllOthersEnabled = selectedOthers > 0;
+
     const startEnabled = selected > 0;
     const startLabel = `Start Download (${selected})`;
-    const summaryText = `Found ${total} ${total === 1 ? 'video' : 'videos'} · ${selected} selected`;
+
+    let summaryText = '';
+    if (totalOthers > 0) {
+        summaryText = `Found ${totalVideos} video${totalVideos === 1 ? '' : 's'} (+${totalOthers} other file${totalOthers === 1 ? '' : 's'}) · ${selected} selected`;
+    } else {
+        summaryText = `Found ${totalVideos} video${totalVideos === 1 ? '' : 's'} · ${selected} selected`;
+    }
 
     return {
         total,
+        totalVideos,
+        totalOthers,
         selected,
-        allSelected,
-        noneSelected,
+        selectedVideos,
+        selectedOthers,
+        allSelected: total > 0 && selected === total,
+        noneSelected: selected === 0,
+        allVideosSelected,
+        noVideosSelected,
         selectAllEnabled,
         deselectAllEnabled,
+        allOthersSelected,
+        noOthersSelected,
+        includeAllOthersEnabled,
+        excludeAllOthersEnabled,
         startEnabled,
         startLabel,
         summaryText
@@ -156,13 +208,33 @@ export function computeSelectionState(videos, selectedIdsSet) {
 
 /**
  * Filters and orders scan videos based on user selection, de-duplicating and dropping unknown IDs.
- * Preserves the original scan order.
- * @param {Array} scanVideos - Array of video objects from folder scan ({ fileId, name, ... }).
- * @param {Array|Set} selectedIds - Iterable/Array/Set of selected fileIds.
+ * Preserves scan order (videos first in scan order, then others in scan order).
+ * Items originating from the 'others' bucket are tagged with `unverifiedType: true`.
+ * @param {Array|Object} videosInput - Array of video objects or { videos, others } container object.
+ * @param {Array|Set} othersOrSelectedIds - Array of other files, or selectedIds if 2-arg signature.
+ * @param {Array|Set} [maybeSelectedIds] - Iterable/Array/Set of selected fileIds when 3-arg signature.
  * @returns {Array} Ordered, de-duplicated array of chosen scan entries.
  */
-export function filterSelectedVideos(scanVideos, selectedIds) {
-    if (!Array.isArray(scanVideos) || !selectedIds) {
+export function filterSelectedVideos(videosInput, othersOrSelectedIds, maybeSelectedIds) {
+    let videoList = [];
+    let otherList = [];
+    let selectedIds = null;
+
+    if (maybeSelectedIds !== undefined) {
+        videoList = Array.isArray(videosInput) ? videosInput : [];
+        otherList = Array.isArray(othersOrSelectedIds) ? othersOrSelectedIds : [];
+        selectedIds = maybeSelectedIds;
+    } else if (videosInput && typeof videosInput === 'object' && !Array.isArray(videosInput) && (videosInput.videos || videosInput.others)) {
+        videoList = Array.isArray(videosInput.videos) ? videosInput.videos : [];
+        otherList = Array.isArray(videosInput.others) ? videosInput.others : [];
+        selectedIds = othersOrSelectedIds;
+    } else {
+        videoList = Array.isArray(videosInput) ? videosInput : [];
+        otherList = [];
+        selectedIds = othersOrSelectedIds;
+    }
+
+    if (!selectedIds) {
         return [];
     }
 
@@ -176,12 +248,27 @@ export function filterSelectedVideos(scanVideos, selectedIds) {
 
     const seen = new Set();
     const result = [];
+    const otherIdSet = new Set(otherList.map(o => o.fileId));
 
-    for (const item of scanVideos) {
+    const combined = [];
+    for (const v of videoList) {
+        if (v && v.fileId) combined.push(v);
+    }
+    for (const o of otherList) {
+        if (o && o.fileId) {
+            combined.push({ ...o, unverifiedType: true });
+        }
+    }
+
+    for (const item of combined) {
         if (!item || !item.fileId) continue;
         if (selectedSet.has(item.fileId) && !seen.has(item.fileId)) {
             seen.add(item.fileId);
-            result.push(item);
+            const isUnverified = Boolean(item.unverifiedType || otherIdSet.has(item.fileId));
+            result.push({
+                ...item,
+                unverifiedType: isUnverified
+            });
         }
     }
 

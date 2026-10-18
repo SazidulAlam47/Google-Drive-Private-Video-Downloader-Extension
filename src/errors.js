@@ -25,7 +25,8 @@ export const ERROR_CODES = {
     NO_VIDEOS_SELECTED: 'NO_VIDEOS_SELECTED',
     DESTINATION_NOT_CONFIGURED: 'DESTINATION_NOT_CONFIGURED',
     BULK_REQUIRES_SUBFOLDER: 'BULK_REQUIRES_SUBFOLDER',
-    QUEUE_BUSY: 'QUEUE_BUSY'
+    QUEUE_BUSY: 'QUEUE_BUSY',
+    NOT_A_VIDEO_OR_NO_STREAM: 'NOT_A_VIDEO_OR_NO_STREAM'
 };
 
 export const ERROR_MESSAGES = {
@@ -33,6 +34,7 @@ export const ERROR_MESSAGES = {
     [ERROR_CODES.NOT_A_DRIVE_FOLDER]: 'No Google Drive folder detected. Open a folder page (e.g. drive.google.com/drive/folders/...) and try again.',
     [ERROR_CODES.NO_VIDEOS_IN_FOLDER]: 'No video files found in the selected folder.',
     [ERROR_CODES.NO_VIDEOS_SELECTED]: 'Select at least one video to download.',
+    [ERROR_CODES.NOT_A_VIDEO_OR_NO_STREAM]: 'No video stream was found — this file may not be a video.',
     [ERROR_CODES.DESTINATION_NOT_CONFIGURED]: 'Save destination is not configured. Please set your destination folder.',
     [ERROR_CODES.BULK_REQUIRES_SUBFOLDER]: 'Bulk download requires a subfolder save destination (interactive prompt is not supported for bulk).',
     [ERROR_CODES.QUEUE_BUSY]: 'A bulk download is currently in progress. Please wait or stop the current queue before starting a new one.',

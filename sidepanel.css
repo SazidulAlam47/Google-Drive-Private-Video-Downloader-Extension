@@ -440,11 +440,52 @@ body {
     background: #1c1c1c;
 }
 
+.selection-title-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
 .selection-title {
     font-size: 14px;
     font-weight: 600;
     color: #fff;
     margin: 0;
+}
+
+.btn-copy-diag {
+    background: #262626;
+    border: 1px solid #3d3d3d;
+    color: #93c5fd;
+    font-size: 10px;
+    padding: 3px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: 500;
+    white-space: nowrap;
+    transition: background 0.15s, color 0.15s;
+}
+
+.btn-copy-diag:hover {
+    background: #374151;
+    color: #fff;
+}
+
+.btn-copy-diag:focus-visible {
+    outline: 2px solid #60a5fa;
+    outline-offset: 1px;
+}
+
+.scan-warning {
+    background: #78350f;
+    color: #fef08a;
+    border: 1px solid #b45309;
+    border-radius: 4px;
+    padding: 6px 8px;
+    font-size: 11px;
+    line-height: 1.4;
+    margin-top: 4px;
 }
 
 .selection-summary {
@@ -456,6 +497,90 @@ body {
 .selection-subsummary {
     font-size: 11px;
     color: #888;
+}
+
+.selection-section {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 10px;
+}
+
+.selection-section:last-child {
+    margin-bottom: 2px;
+}
+
+.section-header-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 4px 6px;
+    background: #202020;
+    border-radius: 4px;
+    border: 1px solid #2d2d2d;
+}
+
+.section-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: #ccc;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+
+.section-toggle-btn {
+    background: transparent;
+    border: none;
+    color: #ccc;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    padding: 0;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+
+.section-toggle-btn:hover {
+    color: #fff;
+}
+
+.section-toggle-btn:focus-visible {
+    outline: 2px solid #60a5fa;
+    outline-offset: 2px;
+}
+
+.toggle-arrow {
+    font-size: 9px;
+    display: inline-block;
+    transition: transform 0.15s ease;
+    color: #9ca3af;
+}
+
+.toggle-arrow.expanded {
+    transform: rotate(90deg);
+}
+
+.others-reason-badge {
+    font-size: 10px;
+    color: #9ca3af;
+    background: #262626;
+    border: 1px solid #3d3d3d;
+    border-radius: 3px;
+    padding: 1px 5px;
+    flex-shrink: 0;
+    white-space: nowrap;
+}
+
+.selection-row.other-row {
+    opacity: 0.85;
+}
+
+.selection-row.other-row:hover {
+    opacity: 1;
 }
 
 .selection-controls-row {

@@ -412,8 +412,13 @@ if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage)
                 sendResponse({
                     success: true,
                     videos: report.videos,
+                    others: report.others,
                     totalScanned: report.totalScanned,
-                    subfoldersSkipped: report.subfoldersSkipped
+                    videoCount: report.videoCount,
+                    otherCount: report.otherCount,
+                    subfoldersSkipped: report.subfoldersSkipped,
+                    stats: report.stats,
+                    diagnostics: report.diagnostics
                 });
             } catch (err) {
                 sendResponse({
@@ -480,7 +485,11 @@ if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage)
                 return;
             }
 
-            if (!scan.report || !scan.report.videos || !scan.report.videos.length) {
+            const scanReport = (scan && scan.report) || {};
+            const allScanVideos = scanReport.videos || [];
+            const allScanOthers = scanReport.others || [];
+
+            if (allScanVideos.length === 0 && allScanOthers.length === 0) {
                 sendResponse({
                     success: false,
                     error: ERROR_CODES.NO_VIDEOS_IN_FOLDER,
@@ -499,7 +508,10 @@ if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage)
                 return;
             }
 
-            const chosenVideos = filterSelectedVideos(scan.report.videos, message.selectedFileIds);
+            const chosenVideos = filterSelectedVideos(
+                { videos: allScanVideos, others: allScanOthers },
+                message.selectedFileIds
+            );
             if (!chosenVideos || chosenVideos.length === 0) {
                 sendResponse({
                     success: false,

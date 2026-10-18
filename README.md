@@ -22,8 +22,11 @@ Version 3.0 is a comprehensive architectural upgrade introducing:
 * **Private & Shared Video Support**: Works with any Google Drive video you have legitimate view permissions for.
 * **Zero-Reload Single Download**: Download without reloading your tab or losing your playback position.
 * **Bulk Folder Scanning & Sequential Queue**:
-  * Automatically scans virtualized Drive folder item lists.
-  * Interactive video selection list with checkboxes, Select All / Deselect All controls, and live count before downloading.
+  * Automatically scans virtualized Drive folder item lists with pre-scroll recovery and DOM stabilization.
+  * Multi-signal item classification (file extension, descendant metadata, ARIA labels, SVG/img tooltips) categorizing items into confirmed Videos and unverified Other files without dropping unknown files.
+  * Two-section selection view: confirmed Videos (checked by default) and collapsible Other files (unchecked by default with reason badges), plus one-click Select/Deselect All and Include/Exclude All controls.
+  * Fast failure handling (`NOT_A_VIDEO_OR_NO_STREAM`) without redundant retries when non-video files are downloaded.
+  * Diagnostic clipboard export for inspection and troubleshooting of folder scans.
   * Processes videos strictly one by one in isolated background tabs.
   * Pause, resume, or safely stop queues at any time without closing the source folder tab.
 * **Intelligent Watchdogs & Retries**:
