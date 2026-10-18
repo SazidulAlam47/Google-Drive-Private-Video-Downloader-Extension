@@ -6,6 +6,7 @@ import { attachCaptureForTab, detachCaptureForTab, detachAllPassiveCaptures, rec
 import { chunkedDownloadFn } from './src/download-engine.js';
 import { ERROR_CODES, getErrorMessage } from './src/errors.js';
 import { buildDownloadPath, sanitizeSubfolder } from './src/settings.js';
+import { handleSingleDownload } from './src/single.js';
 
 const MAX_CONCURRENT_DOWNLOADS = 3;
 
@@ -375,8 +376,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     if (message.type === 'singleDownload') {
-        sendResponse({ success: false, error: ERROR_CODES.NO_DRIVE_VIDEO_PAGE });
-        return;
+        handleSingleDownload().then(res => {
+            sendResponse(res);
+        }).catch(err => {
+            sendResponse({ success: false, error: 'DOWNLOAD_INIT_FAILED', message: err.message });
+        });
+        return true;
     }
 
     if (message.type === 'bulkScan') {
